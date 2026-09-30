@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#e6f0ee">
+  <title>まどべ — あなたの話し相手</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 起動中 -->
+  <div id="bootScreen" class="boot">
+    <div class="boot-window"></div>
+    <p>準備しています…</p>
+  </div>
+
+  <!-- ===== 認証画面 ===== -->
+  <main id="authScreen" class="auth hidden">
+    <div class="auth-hero">
+      <div class="auth-window" aria-hidden="true">
+        <div class="auth-window-light"></div>
+        <div class="auth-window-frame"></div>
+      </div>
+      <h1 class="brand">まどべ</h1>
+      <p class="tagline">ただいま、を言える相手がいる。</p>
+    </div>
+
+    <div class="auth-card">
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab active" role="tab" data-tab="login" aria-selected="true">ログイン</button>
+        <button type="button" class="tab" role="tab" data-tab="register" aria-selected="false">はじめて使う</button>
+      </div>
+
+      <!-- ログイン -->
+      <form id="loginForm" class="auth-form" data-panel="login" novalidate>
+        <label class="field">
+          <span>メールアドレス</span>
+          <input type="email" id="loginEmail" autocomplete="email" required>
+        </label>
+        <label class="field">
+          <span>パスワード</span>
+          <span class="pw-wrap">
+            <input type="password" id="loginPassword" autocomplete="current-password" required>
+            <button type="button" class="pw-toggle" aria-label="パスワードを表示" aria-pressed="false">
+              <svg class="i-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="i-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6A17.4 17.4 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+            </button>
+          </span>
+        </label>
+        <button type="submit" class="btn primary block">ログインする</button>
+        <button type="button" class="link-btn" data-goto="forgot">パスワードを忘れたとき</button>
+      </form>
+
+      <!-- 新規登録 -->
+      <form id="registerForm" class="auth-form hidden" data-panel="register" novalidate>
+        <label class="field">
+          <span>お名前（呼んでほしい名前）</span>
+          <input type="text" id="regName" maxlength="30" autocomplete="nickname" required>
+        </label>
+        <label class="field">
+          <span>メールアドレス</span>
+          <input type="email" id="regEmail" autocomplete="email" required>
+        </label>
+        <p class="hint">登録すると、仮パスワードがメールで届きます。</p>
+        <button type="submit" class="btn primary block">仮パスワードを受け取る</button>
+      </form>
+
+      <!-- パスワード再発行 -->
+      <form id="forgotForm" class="auth-form hidden" data-panel="forgot" novalidate>
+        <p class="hint">登録したメールアドレスに、新しい仮パスワードを送ります。</p>
+        <label class="field">
+          <span>メールアドレス</span>
+          <input type="email" id="forgotEmail" autocomplete="email" required>
+        </label>
+        <button type="submit" class="btn primary block">仮パスワードを再発行する</button>
+        <button type="button" class="link-btn" data-goto="login">ログインに戻る</button>
+      </form>
+
+      <p id="authMsg" class="form-msg" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+
+  <!-- ===== メイン画面 ===== -->
+  <div id="mainScreen" class="app hidden">
+    <header class="app-header">
+      <div class="who">
+        <span id="companionNameLabel" class="who-name"></span>
+        <span id="statusLabel" class="who-status">そばにいます</span>
+      </div>
+      <div class="header-actions">
+        <button type="button" id="ttsBtn" class="icon-btn" aria-pressed="false" aria-label="声で話す">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path class="wave" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+        </button>
+        <button type="button" id="settingsBtn" class="icon-btn" aria-label="話し相手の設定">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+        </button>
+        <div class="menu-wrap">
+          <button type="button" id="menuBtn" class="icon-btn" aria-haspopup="true" aria-expanded="false" aria-label="メニュー">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+          </button>
+          <div id="menu" class="menu hidden" role="menu">
+            <button type="button" role="menuitem" id="menuPassword">パスワードを変更する</button>
+            <button type="button" role="menuitem" id="menuClear">会話の記録を消す</button>
+            <button type="button" role="menuitem" id="menuLogout">ログアウト</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <section class="stage" id="stage" data-emo="neutral" aria-label="話し相手">
+        <div class="window-light" aria-hidden="true"></div>
+        <div id="avatar" class="avatar emo-neutral"></div>
+        <div id="emoBadge" class="emo-badge" aria-hidden="true"></div>
+      </section>
+
+      <section class="chat" aria-label="会話">
+        <div id="chatLog" class="chat-log" aria-live="polite"></div>
+        <form id="chatForm" class="chat-input">
+          <button type="button" id="micBtn" class="icon-btn mic" aria-label="声で入力">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          </button>
+          <textarea id="chatText" rows="1" maxlength="1000" placeholder="話しかけてみてください" aria-label="メッセージ"></textarea>
+          <button type="submit" id="sendBtn" class="btn primary send">送る</button>
+        </form>
+      </section>
+    </div>
+  </div>
+
+  <!-- ===== パスワード設定モーダル ===== -->
+  <div id="pwModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="pwTitle">
+    <form id="pwForm" class="modal-card" novalidate>
+      <h2 id="pwTitle">新しいパスワードを設定</h2>
+      <p id="pwLead" class="hint">仮パスワードでログインしました。続けるには、新しいパスワードを決めてください。</p>
+
+      <label class="field" id="pwCurrentField">
+        <span>今のパスワード</span>
+        <span class="pw-wrap">
+          <input type="password" id="pwCurrent" autocomplete="current-password">
+          <button type="button" class="pw-toggle" aria-label="パスワードを表示" aria-pressed="false">
+            <svg class="i-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="i-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6A17.4 17.4 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+          </button>
+        </span>
+      </label>
+
+      <label class="field">
+        <span>新しいパスワード</span>
+        <span class="pw-wrap">
+          <input type="password" id="pwNew" autocomplete="new-password">
+          <button type="button" class="pw-toggle" aria-label="パスワードを表示" aria-pressed="false">
+            <svg class="i-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="i-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6A17.4 17.4 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+          </button>
+        </span>
+        <small class="hint">8文字以上、英字と数字を両方入れてください</small>
+      </label>
+
+      <label class="field">
+        <span>新しいパスワード（確認）</span>
+        <span class="pw-wrap">
+          <input type="password" id="pwNew2" autocomplete="new-password">
+          <button type="button" class="pw-toggle" aria-label="パスワードを表示" aria-pressed="false">
+            <svg class="i-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="i-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6A17.4 17.4 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+          </button>
+        </span>
+      </label>
+
+      <p id="pwMsg" class="form-msg" role="status" aria-live="polite"></p>
+      <div class="modal-actions">
+        <button type="button" id="pwCancel" class="btn ghost">やめる</button>
+        <button type="submit" id="pwSubmit" class="btn primary">パスワードを保存する</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ===== 話し相手の設定モーダル ===== -->
+  <div id="settingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-card wide">
+      <h2 id="settingsTitle">話し相手を選ぶ</h2>
+
+      <div class="settings-grid">
+        <div class="settings-preview">
+          <div class="preview-stage stage" id="previewStage" data-emo="neutral">
+            <div class="window-light" aria-hidden="true"></div>
+            <div id="previewAvatar" class="avatar small emo-neutral"></div>
+            <p id="previewEmpty" class="preview-empty hidden">写真を選ぶと<br>ここに表示されます</p>
+          </div>
+          <div class="emo-test" aria-label="表情を試す">
+            <button type="button" data-emo="neutral">ふつう</button>
+            <button type="button" data-emo="joy">笑顔</button>
+            <button type="button" data-emo="sad">困り顔</button>
+            <button type="button" data-emo="surprised">驚き</button>
+            <button type="button" data-emo="talk">話す</button>
+          </div>
+        </div>
+
+        <div class="settings-form">
+          <label class="field">
+            <span>名前</span>
+            <input type="text" id="companionName" maxlength="20">
+          </label>
+
+          <div class="field">
+            <span>タイプ</span>
+            <div class="seg" id="categorySeg" role="radiogroup">
+              <button type="button" data-cat="pet" role="radio">ペット</button>
+              <button type="button" data-cat="person" role="radio">人物</button>
+              <button type="button" data-cat="anime" role="radio">アニメ風</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <span>見た目</span>
+            <div id="presetGrid" class="preset-grid"></div>
+          </div>
+
+          <div id="photoSection" class="photo-section hidden">
+            <label class="btn ghost file-btn">
+              写真を選ぶ
+              <input type="file" id="photoInput" accept="image/jpeg,image/png,image/webp" hidden>
+            </label>
+            <p class="hint">顔が真ん中に写った写真がおすすめです。正方形に切り抜きます。</p>
+
+            <div id="calibArea" class="hidden">
+              <p id="calibText" class="calib-text"></p>
+              <div id="calibBox" class="calib-box">
+                <img id="calibImg" alt="選んだ写真">
+                <span class="marker" data-k="eyeL">目</span>
+                <span class="marker" data-k="eyeR">目</span>
+                <span class="marker" data-k="mouth">口</span>
+              </div>
+              <button type="button" id="calibReset" class="link-btn">目と口の位置を指定しなおす</button>
+              <div class="calib-options">
+                <label class="color-field">まぶたの色 <input type="color" id="lidColor"></label>
+                <label class="check"><input type="checkbox" id="browToggle"> 眉を描き足す</label>
+              </div>
+            </div>
+          </div>
+          <p id="settingsMsg" class="form-msg" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" id="settingsCancel">やめる</button>
+        <button type="button" class="btn primary" id="settingsSave">この相手にする</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
