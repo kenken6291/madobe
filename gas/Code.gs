@@ -35,8 +35,16 @@ const HISTORY_CONTEXT = 20;         // Geminiに渡す直近の会話数
 const HISTORY_SCAN_ROWS = 3000;     // 履歴検索で遡る最大行数
 const HASH_ROUNDS = 300;
 const EMOTIONS = ['joy', 'neutral', 'sad', 'surprised'];
-// 写真の種類：4表情 ＋ 普通の顔の「瞬き」「しゃべり」
-const IMAGE_KEYS = ['neutral', 'joy', 'sad', 'surprised', 'blink', 'talk'];
+// 写真の種類：4表情 × 「顔」「瞬き」「しゃべり」
+// 普通の顔は neutral / blink / talk、他は joy / joy_blink / joy_talk など
+const IMAGE_KEYS = [
+  'neutral', 'blink', 'talk',
+  'joy', 'joy_blink', 'joy_talk',
+  'sad', 'sad_blink', 'sad_talk',
+  'surprised', 'surprised_blink', 'surprised_talk'
+];
+// 目の位置を個別登録できる写真（瞬き写真は不要）
+const PER_EYE_KEYS = ['joy', 'sad', 'surprised', 'talk', 'joy_talk', 'sad_talk', 'surprised_talk'];
 const CATEGORIES = ['pet', 'person', 'anime'];
 const PRESETS = ['dog', 'cat', 'person_f', 'person_m', 'anime_g', 'anime_b', 'custom'];
 
@@ -212,11 +220,12 @@ function sanitizeConfig_(c) {
     mouth: pt(c.mouth, 50, 68),
     lidColor: color(c.lidColor),
     brows: !!c.brows,
-    perEmotion: { joy: null, sad: null, surprised: null, talk: null }
+    perEmotion: {}
   };
-  // 表情ごとの写真で、目の位置を個別に登録した場合（talk=しゃべり写真）
+  // 写真ごとに目の位置を個別に登録した場合
   const pe = c.perEmotion || {};
-  ['joy', 'sad', 'surprised', 'talk'].forEach(function (e) {
+  PER_EYE_KEYS.forEach(function (e) {
+    out.perEmotion[e] = null;
     if (pe[e] && typeof pe[e] === 'object') {
       out.perEmotion[e] = {
         eyeL: pt(pe[e].eyeL, out.eyeL.x, out.eyeL.y),

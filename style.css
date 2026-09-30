@@ -436,35 +436,33 @@ input[type="range"]:disabled { opacity: .45; }
   box-shadow: 0 10px 30px rgba(31, 58, 60, .2);
   background: var(--pane);
 }
-.photo-layer { position: absolute; inset: 0; opacity: 0; transition: opacity .35s ease; }
-.photo-layer.show { opacity: 1; }
+/* 表情ごとのグループ（顔・しゃべり・瞬き）をフェードで切り替え */
+.photo-group { position: absolute; inset: 0; opacity: 0; transition: opacity .35s ease; }
+.photo-group.show { opacity: 1; }
+.photo-layer { position: absolute; inset: 0; }
 .photo-layer .photo { width: 100%; height: 100%; object-fit: cover; display: block; transition: filter .6s ease; }
 .photo-layer .overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
 
+/* しゃべり・瞬き：グループ内で瞬時に切り替え（瞬きが一番上） */
+.photo-layer.sub { opacity: 0; }
+.avatar.talk-open .photo-layer.sub[data-kind="talk"] { opacity: 1; }
+.avatar.blink .photo-layer.sub[data-kind="blink"] { opacity: 1; }
+
 /* その表情の写真がないとき（普通の顔で代用）だけ、色味やまぶたで表情を足す */
-.photo-mode.emo-joy .fallback .photo { filter: brightness(1.07) saturate(1.2); }
-.photo-mode.emo-sad .fallback .photo { filter: saturate(.72) brightness(.94); }
-.photo-mode.emo-surprised .fallback .photo { filter: contrast(1.06) brightness(1.04); }
+.photo-mode.emo-joy .photo-group.fallback .photo { filter: brightness(1.07) saturate(1.2); }
+.photo-mode.emo-sad .photo-group.fallback .photo { filter: saturate(.72) brightness(.94); }
+.photo-mode.emo-surprised .photo-group.fallback .photo { filter: contrast(1.06) brightness(1.04); }
 
 .lid { transform-origin: 50% 0; transform: scaleY(0); transition: transform .08s ease; }
-.photo-mode.emo-joy .fallback .lid { transform: scaleY(.38); transition-duration: .3s; }
-.photo-mode.emo-sad .fallback .lid { transform: scaleY(.3); transition-duration: .3s; }
-.photo-mode.blink .photo-layer .lid { transform: scaleY(1); transition-duration: .07s; }
-
+.photo-mode.emo-joy .photo-group.fallback .lid { transform: scaleY(.38); transition-duration: .3s; }
+.photo-mode.emo-sad .photo-group.fallback .lid { transform: scaleY(.3); transition-duration: .3s; }
+.avatar.photo-mode.blink .photo-group .lid { transform: scaleY(1); transition-duration: .07s; }
 
 .photo-mode .brow { transform: none; }
-.photo-mode.emo-joy .fallback .brow { transform: translateY(-1.5px); }
-.photo-mode.emo-surprised .fallback .brow { transform: translateY(-3px); }
-.photo-mode.emo-sad .fallback .brow-l { transform: translateY(-.5px) rotate(-14deg); }
-.photo-mode.emo-sad .fallback .brow-r { transform: translateY(-.5px) rotate(14deg); }
-
-/* 瞬き・しゃべり写真：普通の顔の上に瞬時に重ねる（フェードなし） */
-.photo-layer.sub { transition: none; }
-.photo-mode.base-neutral.talk-open .photo-layer.sub[data-emo="talk"] { opacity: 1; }
-.photo-mode.base-neutral.blink .photo-layer.sub[data-emo="blink"] { opacity: 1; }
-.photo-mode.emo-joy .sub.fallback .photo { filter: brightness(1.07) saturate(1.2); }
-.photo-mode.emo-sad .sub.fallback .photo { filter: saturate(.72) brightness(.94); }
-.photo-mode.emo-surprised .sub.fallback .photo { filter: contrast(1.06) brightness(1.04); }
+.photo-mode.emo-joy .photo-group.fallback .brow { transform: translateY(-1.5px); }
+.photo-mode.emo-surprised .photo-group.fallback .brow { transform: translateY(-3px); }
+.photo-mode.emo-sad .photo-group.fallback .brow-l { transform: translateY(-.5px) rotate(-14deg); }
+.photo-mode.emo-sad .photo-group.fallback .brow-r { transform: translateY(-.5px) rotate(14deg); }
 
 /* 本物の表情写真のときは、体の動きも控えめに */
 .photo-mode.emo-sad .avatar-inner { transform: translateY(4px); }
@@ -557,14 +555,16 @@ input[type="range"]:disabled { opacity: .45; }
 .check input { width: 20px; height: 20px; accent-color: var(--teal); }
 
 /* 表情ごとの写真スロット */
-.photo-slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+.photo-slots { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.slot-row { display: grid; grid-template-columns: 4.8em repeat(3, 1fr); gap: 6px; align-items: center; }
+.slot-row-label { font-weight: 700; font-size: .85rem; }
 .photo-slot {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   padding: 6px 4px 8px; border: 2px solid var(--line); border-radius: var(--radius-m);
   background: var(--paper); font-size: .8rem;
 }
 .photo-slot .slot-thumb {
-  width: 100%; max-width: 76px; aspect-ratio: 1; border-radius: 50%;
+  width: 100%; max-width: 60px; aspect-ratio: 1; border-radius: 50%;
   display: grid; place-items: center; overflow: hidden;
   background: var(--sky); color: var(--muted); font-size: 1.6rem;
 }

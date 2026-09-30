@@ -244,7 +244,7 @@
             </div>
 
             <div id="photoSection" class="photo-section hidden">
-              <p class="hint">表情ごとに写真を登録できます。「普通の顔」は必須です。ほかは登録した分だけ使います。「瞬き」「しゃべり」は普通の顔の目を閉じた写真・口を開けた写真で、まばたきや話すときに切り替わります。写真ごとに両目の位置を登録すると、まばたきが自然になります。</p>
+              <p class="hint">表情（普通の顔・笑顔・困り顔・驚き顔）ごとに、「顔」「瞬き（目を閉じた）」「しゃべり（口を開けた）」の写真を登録できます。必須は「普通の顔」の顔写真だけで、ほかは登録した分だけ使います。</p>
               <div id="photoSlots" class="photo-slots"></div>
 
               <div class="slot-panel">
@@ -260,7 +260,7 @@
 
                 <div id="calibArea" class="hidden">
                   <label class="check same-pos hidden" id="samePosWrap">
-                    <input type="checkbox" id="samePos"> 目の位置は「普通の顔」と同じにする（登録を省略）
+                    <input type="checkbox" id="samePos"> <span id="samePosLabel">目の位置は「普通の顔」と同じにする（登録を省略）</span>
                   </label>
                   <div id="calibWrap">
                     <p id="calibText" class="calib-text"></p>
