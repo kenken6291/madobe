@@ -8,18 +8,22 @@ const GAS_URL = String(window.GAS_URL || '');
 const TOKEN_KEY = 'madobe_token';
 const PREFS_KEY = 'madobe_prefs';
 const EMOTIONS = ['joy', 'neutral', 'sad', 'surprised'];
-const CALIB_KEYS = ['eyeL', 'eyeR', 'mouth'];
-const CALIB_LABELS = ['画面の左側にある目', '画面の右側にある目', '口のまんなか'];
+// 写真は「目の位置」だけ登録（口の変化は写真では表示しない）
+const CALIB_KEYS = ['eyeL', 'eyeR'];
+const CALIB_LABELS = ['画面の左側にある目', '画面の右側にある目'];
 const PHOTO_EMOS = ['neutral', 'joy', 'sad', 'surprised'];
 const PHOTO_SUBS = ['blink', 'talk'];                 // 普通の顔の「瞬き」「しゃべり」
 const PHOTO_SLOTS = [...PHOTO_EMOS, ...PHOTO_SUBS];
+// 目の位置を登録できる写真（瞬き写真は目を閉じているので不要）
+const EYE_SLOTS = ['neutral', 'joy', 'sad', 'surprised', 'talk'];
+const PER_KEYS = ['joy', 'sad', 'surprised', 'talk'];
 const EMO_LABELS = {
   neutral: '普通の顔', joy: '笑顔', sad: '困り顔', surprised: '驚き顔',
   blink: '瞬き', talk: 'しゃべり'
 };
 const SLOT_HINTS = {
   blink: '普通の顔で「目を閉じた」写真です。まばたきのときに一瞬だけ切り替わります。',
-  talk: '普通の顔で「口を開けた」写真です。しゃべっている間、普通の顔と交互に切り替わります。'
+  talk: '普通の顔で「口を開けた」写真です。しゃべっている間、普通の顔と交互に切り替わります。「普通の顔」と同じ位置・大きさで撮ってください。'
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -242,13 +246,13 @@ function defaultConfig() {
   return {
     eyeL: { x: 38, y: 42 }, eyeR: { x: 62, y: 42 }, mouth: { x: 50, y: 68 },
     lidColor: '#d9a88a', brows: false,
-    perEmotion: { joy: null, sad: null, surprised: null }
+    perEmotion: { joy: null, sad: null, surprised: null, talk: null }
   };
 }
 
 function normalizeConfig(cfg) {
   const c = Object.assign(defaultConfig(), JSON.parse(JSON.stringify(cfg || {})));
-  c.perEmotion = Object.assign({ joy: null, sad: null, surprised: null }, c.perEmotion || {});
+  c.perEmotion = Object.assign({ joy: null, sad: null, surprised: null, talk: null }, c.perEmotion || {});
   return c;
 }
 
@@ -265,7 +269,7 @@ function escAttr(s) {
 }
 
 function photoLayerHTML(url, c, emo, opts = {}) {
-  const { lids = true, mouth = true, cls = 'main' } = opts;
+  const { lids = true, cls = 'main' } = opts;
   const d = Math.max(8, Math.hypot(c.eyeR.x - c.eyeL.x, c.eyeR.y - c.eyeL.y));
   const er = d * 0.26;
   // 上端を基準に scaleY で下ろす（1=閉じる / .38=笑顔の細め目）
@@ -275,15 +279,10 @@ function photoLayerHTML(url, c, emo, opts = {}) {
       <path class="brow ${bcls}" d="M${-er * 1.1},${er * .2} Q0,${-er * .45} ${er * 1.1},${er * .2}"
             stroke="#2e2320" stroke-width="${er * .32}" fill="none" stroke-linecap="round" opacity=".75"/>
     </g>` : '';
-  const mouthSvg = mouth ? `
-        <g transform="translate(${c.mouth.x} ${c.mouth.y})">
-          <ellipse class="m-talk" rx="${d * .3}" ry="${d * .2}" fill="#3a1d1d"/>
-        </g>` : '';
-  const overlay = (lids || mouth) ? `
+  const overlay = lids ? `
       <svg class="overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         ${lids ? lid(c.eyeL) + lid(c.eyeR) : ''}
         ${brow(c.eyeL, 'brow-l')}${brow(c.eyeR, 'brow-r')}
-        ${mouthSvg}
       </svg>` : '';
   return `<div class="photo-layer ${cls}" data-emo="${emo}">
       <img class="photo" src="${escAttr(url)}" alt="" referrerpolicy="no-referrer" draggable="false">${overlay}
@@ -301,9 +300,9 @@ function photoAvatarHTML(images, cfg) {
     .join('');
   const n = slotConfigOf(cfg, 'neutral');
   const talk = images && images.talk
-    ? photoLayerHTML(images.talk, Object.assign({}, n, { brows: false }), 'talk', { mouth: false, cls: 'sub' }) : '';
+    ? photoLayerHTML(images.talk, slotConfigOf(cfg, 'talk'), 'talk', { cls: 'sub' }) : '';
   const blink = images && images.blink
-    ? photoLayerHTML(images.blink, n, 'blink', { lids: false, mouth: false, cls: 'sub' }) : '';
+    ? photoLayerHTML(images.blink, n, 'blink', { lids: false, cls: 'sub' }) : '';
   return `<div class="avatar-inner photo-wrap" role="img" aria-label="話し相手の写真">${main}${talk}${blink}</div>`;
 }
 
@@ -1224,7 +1223,13 @@ function openSettings(tab = 'char') {
     preset: u.avatarPreset || 'dog',
     photos,
     slot: 'neutral',
-    steps: { neutral: imgs.neutral ? 3 : 0, joy: 3, sad: 3, surprised: 3, blink: 3, talk: 3 },
+    steps: (() => {
+      const done = CALIB_KEYS.length;
+      const o = {};
+      PHOTO_SLOTS.forEach(e => { o[e] = done; });
+      if (!imgs.neutral) o.neutral = 0;
+      return o;
+    })(),
     config: normalizeConfig(u.avatarConfig),
     voices: JSON.parse(JSON.stringify(prefs.voices || {})),
     view: VIEW_KEYS.reduce((o, k) => (o[k] = prefs[k], o), {})
@@ -1298,10 +1303,11 @@ function draftImages() {
 /** 今選んでいる表情スロットの目・口設定（普通の顔と同じなら null） */
 function slotCfg(slot) {
   if (slot === 'neutral') return draft.config;
-  return PHOTO_EMOS.includes(slot) ? draft.config.perEmotion[slot] : null;
+  return PER_KEYS.includes(slot) ? draft.config.perEmotion[slot] : null;
 }
 
 function isSubSlot(slot) { return PHOTO_SUBS.includes(slot); }
+function needsEyes(slot) { return EYE_SLOTS.includes(slot); }
 
 function renderPreview() {
   const imgs = draftImages();
@@ -1319,13 +1325,13 @@ function renderSlots() {
   PHOTO_SLOTS.forEach(e => {
     const ph = draft.photos[e];
     const cfg = slotCfg(e);
-    const needTap = ph.src && (e === 'neutral' || cfg) && draft.steps[e] < 3;
+    const needTap = ph.src && (e === 'neutral' || cfg) && draft.steps[e] < CALIB_KEYS.length;
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'photo-slot' + (draft.slot === e ? ' selected' : '');
     b.setAttribute('aria-pressed', String(draft.slot === e));
     b.innerHTML = `<span class="slot-thumb">${ph.src ? `<img src="${escAttr(ph.src)}" alt="" referrerpolicy="no-referrer">` : '＋'}</span>
-      <span>${EMO_LABELS[e]}</span>${needTap ? '<span class="need">位置を指定</span>' : ''}`;
+      <span>${EMO_LABELS[e]}</span>${needTap ? '<span class="need">目の位置を登録</span>' : ''}`;
     b.addEventListener('click', () => {
       draft.slot = e;
       renderPhotoSection();
@@ -1347,11 +1353,11 @@ function renderPhotoSection() {
   const isSub = isSubSlot(s);
   $('#slotTitle').textContent = `${EMO_LABELS[s]}の写真` + (isN ? '（必須）' : '（なくても大丈夫です）');
   $('#slotHint').textContent = isSub
-    ? SLOT_HINTS[s] + '「普通の顔」と同じ位置・大きさで撮ってください（目や口の位置指定はいりません）。'
-    : '顔が真ん中に写った写真がおすすめです（正方形に切り抜きます）。どの表情も同じ位置・同じ大きさで撮ると、自然に切り替わります。';
+    ? SLOT_HINTS[s] + (s === 'blink' ? '（目の位置の登録はいりません）' : '')
+    : '顔が真ん中に写った写真がおすすめです（正方形に切り抜きます）。写真を選んだら、両目の位置をタップして登録します。';
   $('#slotRemove').classList.toggle('hidden', isN || !ph.src);
-  $('#calibArea').classList.toggle('hidden', !ph.src || isSub);
-  if (!ph.src || isSub) return;
+  $('#calibArea').classList.toggle('hidden', !ph.src || !needsEyes(s));
+  if (!ph.src || !needsEyes(s)) return;
 
   const cfg = slotCfg(s);
   $('#samePosWrap').classList.toggle('hidden', isN);
@@ -1381,11 +1387,11 @@ function renderMarkers() {
   });
   const t = $('#calibText');
   if (!cfg) { t.textContent = ''; return; }
-  if (step < 3) {
-    t.textContent = `写真の「${CALIB_LABELS[step]}」をタップしてください（${step + 1}/3）`;
+  if (step < CALIB_KEYS.length) {
+    t.textContent = `写真の「${CALIB_LABELS[step]}」の真ん中をタップしてください（${step + 1}/${CALIB_KEYS.length}）`;
     t.classList.remove('done');
   } else {
-    t.textContent = '目と口の位置を設定しました。左の「表情を試す」で確認できます。';
+    t.textContent = `「${EMO_LABELS[draft.slot]}」の目の位置を登録しました。左の「瞬き」で確認できます。`;
     t.classList.add('done');
   }
 }
@@ -1519,7 +1525,10 @@ function bindSettings() {
         const pe = draft.config.perEmotion;
         draft.config = Object.assign(defaultConfig(), { brows: draft.config.brows, perEmotion: pe });
         draft.steps.neutral = 0;
-      } else if (slotCfg(slot)) {
+      } else if (PER_KEYS.includes(slot)) {
+        // 表情ごとに目の位置を登録する（普通の顔の位置を初期値に）
+        const n = draft.config;
+        draft.config.perEmotion[slot] = { eyeL: { ...n.eyeL }, eyeR: { ...n.eyeR }, mouth: { ...n.mouth }, lidColor: n.lidColor };
         draft.steps[slot] = 0;
       }
       setMsg($('#settingsMsg'), '');
@@ -1534,18 +1543,18 @@ function bindSettings() {
     const slot = draft.slot;
     if (slot === 'neutral') return;
     draft.photos[slot] = { src: '', data: null, ctx: null, removed: true };
-    if (PHOTO_EMOS.includes(slot)) draft.config.perEmotion[slot] = null;
-    draft.steps[slot] = 3;
+    if (PER_KEYS.includes(slot)) draft.config.perEmotion[slot] = null;
+    draft.steps[slot] = CALIB_KEYS.length;
     renderPhotoSection();
     renderPreview();
   });
 
   $('#samePos').addEventListener('change', e => {
     const slot = draft.slot;
-    if (slot === 'neutral' || isSubSlot(slot)) return;
+    if (!PER_KEYS.includes(slot)) return;
     if (e.target.checked) {
       draft.config.perEmotion[slot] = null;
-      draft.steps[slot] = 3;
+      draft.steps[slot] = CALIB_KEYS.length;
     } else {
       const n = draft.config;
       draft.config.perEmotion[slot] = {
@@ -1560,13 +1569,13 @@ function bindSettings() {
   $('#calibBox').addEventListener('click', e => {
     const slot = draft.slot;
     const cfg = slotCfg(slot);
-    if (!cfg || draft.steps[slot] >= 3) return;
+    if (!cfg || draft.steps[slot] >= CALIB_KEYS.length) return;
     const r = e.currentTarget.getBoundingClientRect();
     const x = Math.round(((e.clientX - r.left) / r.width) * 1000) / 10;
     const y = Math.round(((e.clientY - r.top) / r.height) * 1000) / 10;
     cfg[CALIB_KEYS[draft.steps[slot]]] = { x, y };
     draft.steps[slot]++;
-    if (draft.steps[slot] === 3) {
+    if (draft.steps[slot] === CALIB_KEYS.length) {
       autoSampleLid(slot);
       renderSlots();
       renderPreview();
@@ -1653,8 +1662,8 @@ function bindSettings() {
         setMsg(msg, text, 'error');
       };
       if (!draft.photos.neutral.src) return fail('neutral', '「普通の顔」の写真を選んでください');
-      const bad = PHOTO_EMOS.find(e => draft.photos[e].src && slotCfg(e) && draft.steps[e] < 3);
-      if (bad) return fail(bad, `「${EMO_LABELS[bad]}」の目と口の位置を最後までタップしてください`);
+      const bad = EYE_SLOTS.find(e => draft.photos[e].src && slotCfg(e) && draft.steps[e] < CALIB_KEYS.length);
+      if (bad) return fail(bad, `「${EMO_LABELS[bad]}」の両目の位置をタップしてください`);
     }
 
     withBusy($('#settingsSave'), async () => {
@@ -1672,7 +1681,7 @@ function bindSettings() {
           const removes = PHOTO_SLOTS.filter(e => draft.photos[e].removed);
           if (removes.length) payload.removeImages = removes;
           // 写真のない表情の個別設定は送らない
-          PHOTO_EMOS.forEach(e => { if (e !== 'neutral' && !draft.photos[e].src) payload.avatarConfig.perEmotion[e] = null; });
+          PER_KEYS.forEach(e => { if (!draft.photos[e].src) payload.avatarConfig.perEmotion[e] = null; });
         }
         const r = await api('saveAvatar', payload);
         state.user = r.user;

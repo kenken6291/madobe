@@ -451,8 +451,6 @@ input[type="range"]:disabled { opacity: .45; }
 .photo-mode.emo-sad .fallback .lid { transform: scaleY(.3); transition-duration: .3s; }
 .photo-mode.blink .photo-layer .lid { transform: scaleY(1); transition-duration: .07s; }
 
-.photo-mode .m-talk { opacity: 0; }
-.avatar.photo-mode.talking .m-talk { opacity: .72; }
 
 .photo-mode .brow { transform: none; }
 .photo-mode.emo-joy .fallback .brow { transform: translateY(-1.5px); }
@@ -464,7 +462,6 @@ input[type="range"]:disabled { opacity: .45; }
 .photo-layer.sub { transition: none; }
 .photo-mode.base-neutral.talk-open .photo-layer.sub[data-emo="talk"] { opacity: 1; }
 .photo-mode.base-neutral.blink .photo-layer.sub[data-emo="blink"] { opacity: 1; }
-.photo-mode.has-talk .photo-layer.main[data-emo="neutral"] .m-talk { display: none; }
 .photo-mode.emo-joy .sub.fallback .photo { filter: brightness(1.07) saturate(1.2); }
 .photo-mode.emo-sad .sub.fallback .photo { filter: saturate(.72) brightness(.94); }
 .photo-mode.emo-surprised .sub.fallback .photo { filter: contrast(1.06) brightness(1.04); }

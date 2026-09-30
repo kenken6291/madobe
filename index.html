@@ -244,7 +244,7 @@
             </div>
 
             <div id="photoSection" class="photo-section hidden">
-              <p class="hint">表情ごとに写真を登録できます。「普通の顔」は必須です。ほかは登録した分だけ使います。「瞬き」「しゃべり」は普通の顔の目を閉じた写真・口を開けた写真で、まばたきや話すときに切り替わります。</p>
+              <p class="hint">表情ごとに写真を登録できます。「普通の顔」は必須です。ほかは登録した分だけ使います。「瞬き」「しゃべり」は普通の顔の目を閉じた写真・口を開けた写真で、まばたきや話すときに切り替わります。写真ごとに両目の位置を登録すると、まばたきが自然になります。</p>
               <div id="photoSlots" class="photo-slots"></div>
 
               <div class="slot-panel">
@@ -260,7 +260,7 @@
 
                 <div id="calibArea" class="hidden">
                   <label class="check same-pos hidden" id="samePosWrap">
-                    <input type="checkbox" id="samePos"> 目と口の位置は「普通の顔」と同じ
+                    <input type="checkbox" id="samePos"> 目の位置は「普通の顔」と同じにする（登録を省略）
                   </label>
                   <div id="calibWrap">
                     <p id="calibText" class="calib-text"></p>
@@ -268,9 +268,8 @@
                       <img id="calibImg" alt="選んだ写真" referrerpolicy="no-referrer">
                       <span class="marker" data-k="eyeL">目</span>
                       <span class="marker" data-k="eyeR">目</span>
-                      <span class="marker" data-k="mouth">口</span>
                     </div>
-                    <button type="button" id="calibReset" class="link-btn">目と口の位置を指定しなおす</button>
+                    <button type="button" id="calibReset" class="link-btn">目の位置を登録しなおす</button>
                     <div class="calib-options">
                       <label class="color-field">まぶたの色 <input type="color" id="lidColor"></label>
                       <label class="check" id="browWrap"><input type="checkbox" id="browToggle"> 眉を描き足す</label>

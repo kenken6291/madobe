@@ -212,11 +212,11 @@ function sanitizeConfig_(c) {
     mouth: pt(c.mouth, 50, 68),
     lidColor: color(c.lidColor),
     brows: !!c.brows,
-    perEmotion: { joy: null, sad: null, surprised: null }
+    perEmotion: { joy: null, sad: null, surprised: null, talk: null }
   };
-  // 表情ごとの写真で、目・口の位置を個別に指定した場合
+  // 表情ごとの写真で、目の位置を個別に登録した場合（talk=しゃべり写真）
   const pe = c.perEmotion || {};
-  ['joy', 'sad', 'surprised'].forEach(function (e) {
+  ['joy', 'sad', 'surprised', 'talk'].forEach(function (e) {
     if (pe[e] && typeof pe[e] === 'object') {
       out.perEmotion[e] = {
         eyeL: pt(pe[e].eyeL, out.eyeL.x, out.eyeL.y),
