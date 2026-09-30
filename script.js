@@ -8,9 +8,10 @@ const GAS_URL = String(window.GAS_URL || '');
 const TOKEN_KEY = 'madobe_token';
 const PREFS_KEY = 'madobe_prefs';
 const EMOTIONS = ['joy', 'neutral', 'sad', 'surprised'];
-// 写真は「目の位置」だけ登録（口の変化は写真では表示しない）
-const CALIB_KEYS = ['eyeL', 'eyeR'];
-const CALIB_LABELS = ['画面の左側にある目', '画面の右側にある目'];
+// 写真アバターは重ね描きをせず、写真の切り替えだけで表現する
+//  ・表情が変わる → その表情の写真
+//  ・まばたき     → その表情の「瞬き」写真に一瞬だけ切り替え
+//  ・話している間 → その表情の「顔」と「しゃべり」写真を交互に切り替え
 const PHOTO_EMOS = ['neutral', 'joy', 'sad', 'surprised'];
 // 写真の種類：各表情ごとに「顔」「瞬き（目を閉じた）」「しゃべり（口を開けた）」
 const PHOTO_KINDS = ['base', 'blink', 'talk'];
@@ -27,9 +28,6 @@ function parseKey(key) {
   return { emo: 'neutral', kind: 'base' };
 }
 const PHOTO_SLOTS = PHOTO_EMOS.flatMap(e => PHOTO_KINDS.map(k => imgKey(e, k)));
-// 目の位置を登録する写真（瞬き写真は目を閉じているので不要）
-const EYE_SLOTS = PHOTO_SLOTS.filter(k => parseKey(k).kind !== 'blink');
-const PER_KEYS = EYE_SLOTS.filter(k => k !== 'neutral');
 function slotLabel(key) {
   const { emo, kind } = parseKey(key);
   return kind === 'base' ? EMO_LABELS[emo] : `${EMO_LABELS[emo]}（${KIND_LABELS[kind]}）`;
@@ -251,67 +249,17 @@ function presetSVG(key) {
 // 写真アバター（パーツをオーバーレイ）
 // =========================================================
 
-function emptyPer() {
-  const o = {};
-  PER_KEYS.forEach(k => { o[k] = null; });
-  return o;
-}
-
 function defaultConfig() {
-  return {
-    eyeL: { x: 38, y: 42 }, eyeR: { x: 62, y: 42 }, mouth: { x: 50, y: 68 },
-    lidColor: '#d9a88a', brows: false,
-    perEmotion: emptyPer()
-  };
-}
-
-function normalizeConfig(cfg) {
-  const c = Object.assign(defaultConfig(), JSON.parse(JSON.stringify(cfg || {})));
-  c.perEmotion = Object.assign(emptyPer(), c.perEmotion || {});
-  return c;
-}
-
-/**
- * 写真ごとの目の位置
- * 個別登録 → （瞬き/しゃべりなら）同じ表情の顔 → 普通の顔 の順で使う
- */
-function slotConfigOf(cfg, key) {
-  const base = normalizeConfig(cfg);
-  if (key === 'neutral') return base;
-  const { emo, kind } = parseKey(key);
-  const own = base.perEmotion[key];
-  if (own) return Object.assign({}, base, own, { brows: false });
-  if (kind !== 'base' && emo !== 'neutral' && base.perEmotion[emo]) {
-    return Object.assign({}, base, base.perEmotion[emo], { brows: false });
-  }
-  return Object.assign({}, base, { brows: false });
+  return { eyeL: { x: 38, y: 42 }, eyeR: { x: 62, y: 42 }, mouth: { x: 50, y: 68 }, lidColor: '#d9a88a', brows: false };
 }
 
 function escAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function photoLayerHTML(url, c, kind, opts = {}) {
-  const { lids = true, cls = 'base' } = opts;
-  let overlay = '';
-  if (lids && c) {
-    const d = Math.max(8, Math.hypot(c.eyeR.x - c.eyeL.x, c.eyeR.y - c.eyeL.y));
-    const er = d * 0.26;
-    // 上端を基準に scaleY で下ろす（1=閉じる / .38=笑顔の細め目）
-    const lid = e => `<ellipse class="lid" cx="${e.x}" cy="${e.y}" rx="${er * 1.25}" ry="${er * 1.05}" fill="${escAttr(c.lidColor)}"/>`;
-    const brow = (e, bcls) => c.brows ? `
-      <g transform="translate(${e.x} ${e.y - er * 1.9})">
-        <path class="brow ${bcls}" d="M${-er * 1.1},${er * .2} Q0,${-er * .45} ${er * 1.1},${er * .2}"
-              stroke="#2e2320" stroke-width="${er * .32}" fill="none" stroke-linecap="round" opacity=".75"/>
-      </g>` : '';
-    overlay = `
-      <svg class="overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-        ${lid(c.eyeL)}${lid(c.eyeR)}
-        ${brow(c.eyeL, 'brow-l')}${brow(c.eyeR, 'brow-r')}
-      </svg>`;
-  }
+function photoLayerHTML(url, kind, cls = 'base') {
   return `<div class="photo-layer ${cls}" data-kind="${kind}">
-      <img class="photo" src="${escAttr(url)}" alt="" referrerpolicy="no-referrer" draggable="false">${overlay}
+      <img class="photo" src="${escAttr(url)}" alt="" referrerpolicy="no-referrer" draggable="false">
     </div>`;
 }
 
@@ -320,13 +268,13 @@ function photoLayerHTML(url, c, kind, opts = {}) {
  * 表情ごとに「顔・しゃべり・瞬き」をひとまとめ（グループ）にして、
  * 表情が変わるとグループごとフェード、瞬き・しゃべりはグループ内で瞬時に切り替える
  */
-function photoAvatarHTML(images, cfg) {
+function photoAvatarHTML(images) {
   const groups = PHOTO_EMOS.filter(e => images && images[e]).map(e => {
     const tk = imgKey(e, 'talk');
     const bk = imgKey(e, 'blink');
-    const base = photoLayerHTML(images[e], slotConfigOf(cfg, e), 'base');
-    const talk = images[tk] ? photoLayerHTML(images[tk], slotConfigOf(cfg, tk), 'talk', { cls: 'sub' }) : '';
-    const blink = images[bk] ? photoLayerHTML(images[bk], null, 'blink', { lids: false, cls: 'sub' }) : '';
+    const base = photoLayerHTML(images[e], 'base');
+    const talk = images[tk] ? photoLayerHTML(images[tk], 'talk', 'sub') : '';
+    const blink = images[bk] ? photoLayerHTML(images[bk], 'blink', 'sub') : '';
     return `<div class="photo-group" data-emo="${e}">${base}${talk}${blink}</div>`;
   }).join('');
   return `<div class="avatar-inner photo-wrap" role="img" aria-label="話し相手の写真">${groups}</div>`;
@@ -358,7 +306,7 @@ class AvatarView {
     this.el.classList.toggle('photo-mode', isPhoto);
     this.el.classList.remove('talk-open');
     if (isPhoto) {
-      this.el.innerHTML = images && images.neutral ? photoAvatarHTML(images, config) : '';
+      this.el.innerHTML = images && images.neutral ? photoAvatarHTML(images) : '';
       $$('img.photo', this.el).forEach(img => {
         img.addEventListener('error', () => {
           const m = String(img.getAttribute('src')).match(/\/d\/([\w-]+)/);
@@ -1237,7 +1185,7 @@ function openSettings(tab = 'char') {
   stopSpeaking();
   const imgs = userImages(u);
   const photos = {};
-  PHOTO_SLOTS.forEach(e => { photos[e] = { src: imgs[e] || '', data: null, ctx: null, removed: false }; });
+  PHOTO_SLOTS.forEach(e => { photos[e] = { src: imgs[e] || '', data: null, removed: false }; });
   Object.assign(draft, {
     tab,
     companionName: u.companionName,
@@ -1245,14 +1193,7 @@ function openSettings(tab = 'char') {
     preset: u.avatarPreset || 'dog',
     photos,
     slot: 'neutral',
-    steps: (() => {
-      const done = CALIB_KEYS.length;
-      const o = {};
-      PHOTO_SLOTS.forEach(e => { o[e] = done; });
-      if (!imgs.neutral) o.neutral = 0;
-      return o;
-    })(),
-    config: normalizeConfig(u.avatarConfig),
+    config: Object.assign(defaultConfig(), u.avatarConfig || {}),
     voices: JSON.parse(JSON.stringify(prefs.voices || {})),
     view: VIEW_KEYS.reduce((o, k) => (o[k] = prefs[k], o), {})
   });
@@ -1322,20 +1263,6 @@ function draftImages() {
   return o;
 }
 
-/** 今選んでいる表情スロットの目・口設定（普通の顔と同じなら null） */
-function slotCfg(slot) {
-  if (slot === 'neutral') return draft.config;
-  return PER_KEYS.includes(slot) ? draft.config.perEmotion[slot] : null;
-}
-
-function needsEyes(slot) { return EYE_SLOTS.includes(slot); }
-
-/** 個別登録の初期値（今使われている位置をコピー） */
-function initialEyes(slot) {
-  const r = slotConfigOf(draft.config, slot);
-  return { eyeL: { ...r.eyeL }, eyeR: { ...r.eyeR }, mouth: { ...r.mouth }, lidColor: r.lidColor };
-}
-
 function renderPreview() {
   const imgs = draftImages();
   const empty = draft.preset === 'custom' && !imgs.neutral;
@@ -1359,15 +1286,13 @@ function renderSlots() {
     PHOTO_KINDS.forEach(kind => {
       const key = imgKey(emo, kind);
       const ph = draft.photos[key];
-      const cfg = slotCfg(key);
-      const needTap = ph.src && (key === 'neutral' || cfg) && draft.steps[key] < CALIB_KEYS.length;
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'photo-slot' + (draft.slot === key ? ' selected' : '');
       b.setAttribute('aria-pressed', String(draft.slot === key));
       b.setAttribute('aria-label', slotLabel(key));
       b.innerHTML = `<span class="slot-thumb">${ph.src ? `<img src="${escAttr(ph.src)}" alt="" referrerpolicy="no-referrer">` : '＋'}</span>
-        <span>${KIND_LABELS[kind]}</span>${needTap ? '<span class="need">目を登録</span>' : ''}`;
+        <span>${KIND_LABELS[kind]}</span>`;
       b.addEventListener('click', () => {
         draft.slot = key;
         renderPhotoSection();
@@ -1393,9 +1318,9 @@ function renderPhotoSection() {
   $('#slotTitle').textContent = `${slotLabel(s)}の写真` + (isN ? '（必須）' : '（なくても大丈夫です）');
   let hint;
   if (kind === 'base') {
-    hint = '顔が真ん中に写った写真がおすすめです（正方形に切り抜きます）。写真を選んだら、両目の位置をタップして登録します。';
+    hint = '顔が真ん中に写った写真がおすすめです（正方形に切り抜きます）。';
   } else if (kind === 'blink') {
-    hint = `「${emoName}」のまま目を閉じた写真です。まばたきのときに一瞬だけ切り替わります（目の位置の登録はいりません）。`;
+    hint = `「${emoName}」のまま目を閉じた写真です。まばたきのときに一瞬だけ切り替わります。`;
   } else {
     hint = `「${emoName}」のまま口を開けた写真です。話している間、「${emoName}」と交互に切り替わります。`;
   }
@@ -1403,49 +1328,11 @@ function renderPhotoSection() {
   if (kind !== 'base' && emo !== 'neutral' && !draft.photos[emo].src) {
     hint += `※「${emoName}」の顔写真を登録していないと使われません。`;
   }
+  if (kind === 'base' && !draft.photos[imgKey(emo, 'blink')].src && ph.src) {
+    hint += `「${emoName}」の瞬き写真がないと、この表情ではまばたきしません。`;
+  }
   $('#slotHint').textContent = hint;
-  $('#samePosLabel').textContent = kind === 'base' || emo === 'neutral'
-    ? '目の位置は「普通の顔」と同じにする（登録を省略）'
-    : `目の位置は「${emoName}」と同じにする（登録を省略）`;
   $('#slotRemove').classList.toggle('hidden', isN || !ph.src);
-  $('#calibArea').classList.toggle('hidden', !ph.src || !needsEyes(s));
-  if (!ph.src || !needsEyes(s)) return;
-
-  const cfg = slotCfg(s);
-  $('#samePosWrap').classList.toggle('hidden', isN);
-  $('#samePos').checked = !isN && !cfg;
-  const needCalib = isN || !!cfg;
-  $('#calibWrap').classList.toggle('hidden', !needCalib);
-  $('#browWrap').classList.toggle('hidden', !isN);
-  if (needCalib) {
-    $('#calibImg').src = ph.src;
-    $('#lidColor').value = cfg.lidColor || '#d9a88a';
-  }
-  $('#browToggle').checked = !!draft.config.brows;
-  renderMarkers();
-}
-
-function renderMarkers() {
-  const cfg = slotCfg(draft.slot);
-  const step = draft.steps[draft.slot];
-  CALIB_KEYS.forEach((k, i) => {
-    const m = $(`.marker[data-k="${k}"]`);
-    const visible = !!cfg && i < step;
-    m.classList.toggle('show', visible);
-    if (visible) {
-      m.style.left = cfg[k].x + '%';
-      m.style.top = cfg[k].y + '%';
-    }
-  });
-  const t = $('#calibText');
-  if (!cfg) { t.textContent = ''; return; }
-  if (step < CALIB_KEYS.length) {
-    t.textContent = `写真の「${CALIB_LABELS[step]}」の真ん中をタップしてください（${step + 1}/${CALIB_KEYS.length}）`;
-    t.classList.remove('done');
-  } else {
-    t.textContent = `「${slotLabel(draft.slot)}」の目の位置を登録しました。左の「瞬き」で確認できます。`;
-    t.classList.add('done');
-  }
 }
 
 function loadAndCropImage(file) {
@@ -1456,38 +1343,15 @@ function loadAndCropImage(file) {
       const size = 512;
       const c = document.createElement('canvas');
       c.width = c.height = size;
-      const ctx = c.getContext('2d', { willReadFrequently: true });
+      const ctx = c.getContext('2d');
       const s = Math.min(img.naturalWidth, img.naturalHeight);
       ctx.drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, size, size);
       URL.revokeObjectURL(url);
-      resolve({ dataUrl: c.toDataURL('image/jpeg', 0.86), ctx });
+      resolve(c.toDataURL('image/jpeg', 0.86));
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('この画像は読み込めませんでした。JPEGかPNGでお試しください')); };
     img.src = url;
   });
-}
-
-function sampleColor(ctx, xPct, yPct) {
-  const size = 512;
-  const cx = Math.round(Math.min(99, Math.max(1, xPct)) / 100 * size);
-  const cy = Math.round(Math.min(99, Math.max(1, yPct)) / 100 * size);
-  const d = ctx.getImageData(Math.max(0, cx - 4), Math.max(0, cy - 4), 9, 9).data;
-  let r = 0, g = 0, b = 0, n = 0;
-  for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
-  return [r / n, g / n, b / n];
-}
-
-/** 目の少し上（まぶた付近）の色を拾って、まばたき用の色にする */
-function autoSampleLid(slot) {
-  const ctx = draft.photos[slot].ctx;
-  const c = slotCfg(slot);
-  if (!ctx || !c) return;
-  const d = Math.hypot(c.eyeR.x - c.eyeL.x, c.eyeR.y - c.eyeL.y);
-  const off = d * 0.26 * 1.6;
-  const a = sampleColor(ctx, c.eyeL.x, c.eyeL.y - off);
-  const b = sampleColor(ctx, c.eyeR.x, c.eyeR.y - off);
-  c.lidColor = '#' + [0, 1, 2].map(i => Math.round((a[i] + b[i]) / 2).toString(16).padStart(2, '0')).join('');
-  $('#lidColor').value = c.lidColor;
 }
 
 // ---- 声パネル ----
@@ -1571,17 +1435,8 @@ function bindSettings() {
     if (f.size > 15 * 1024 * 1024) return setMsg($('#settingsMsg'), '写真が大きすぎます（15MBまで）', 'error');
     const slot = draft.slot;
     try {
-      const { dataUrl, ctx } = await loadAndCropImage(f);
-      draft.photos[slot] = { src: dataUrl, data: dataUrl, ctx, removed: false };
-      if (slot === 'neutral') {
-        const pe = draft.config.perEmotion;
-        draft.config = Object.assign(defaultConfig(), { brows: draft.config.brows, perEmotion: pe });
-        draft.steps.neutral = 0;
-      } else if (PER_KEYS.includes(slot)) {
-        // 写真ごとに目の位置を登録する
-        draft.config.perEmotion[slot] = initialEyes(slot);
-        draft.steps[slot] = 0;
-      }
+      const dataUrl = await loadAndCropImage(f);
+      draft.photos[slot] = { src: dataUrl, data: dataUrl, removed: false };
       setMsg($('#settingsMsg'), '');
       renderPhotoSection();
       renderPreview();
@@ -1593,55 +1448,10 @@ function bindSettings() {
   $('#slotRemove').addEventListener('click', () => {
     const slot = draft.slot;
     if (slot === 'neutral') return;
-    draft.photos[slot] = { src: '', data: null, ctx: null, removed: true };
-    if (PER_KEYS.includes(slot)) draft.config.perEmotion[slot] = null;
-    draft.steps[slot] = CALIB_KEYS.length;
+    draft.photos[slot] = { src: '', data: null, removed: true };
     renderPhotoSection();
     renderPreview();
   });
-
-  $('#samePos').addEventListener('change', e => {
-    const slot = draft.slot;
-    if (!PER_KEYS.includes(slot)) return;
-    if (e.target.checked) {
-      draft.config.perEmotion[slot] = null;
-      draft.steps[slot] = CALIB_KEYS.length;
-    } else {
-      draft.config.perEmotion[slot] = initialEyes(slot);
-      draft.steps[slot] = 0;
-    }
-    renderPhotoSection();
-    renderPreview();
-  });
-
-  $('#calibBox').addEventListener('click', e => {
-    const slot = draft.slot;
-    const cfg = slotCfg(slot);
-    if (!cfg || draft.steps[slot] >= CALIB_KEYS.length) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    const x = Math.round(((e.clientX - r.left) / r.width) * 1000) / 10;
-    const y = Math.round(((e.clientY - r.top) / r.height) * 1000) / 10;
-    cfg[CALIB_KEYS[draft.steps[slot]]] = { x, y };
-    draft.steps[slot]++;
-    if (draft.steps[slot] === CALIB_KEYS.length) {
-      autoSampleLid(slot);
-      renderSlots();
-      renderPreview();
-    }
-    renderMarkers();
-  });
-
-  $('#calibReset').addEventListener('click', () => {
-    draft.steps[draft.slot] = 0;
-    renderSlots();
-    renderMarkers();
-  });
-  $('#lidColor').addEventListener('input', e => {
-    const cfg = slotCfg(draft.slot);
-    if (cfg) cfg.lidColor = e.target.value;
-    renderPreview();
-  });
-  $('#browToggle').addEventListener('change', e => { draft.config.brows = e.target.checked; renderPreview(); });
 
   $$('.emo-test button').forEach(b => b.addEventListener('click', async () => {
     const emo = b.dataset.emo;
@@ -1700,7 +1510,7 @@ function bindSettings() {
     const photoChanged = PHOTO_SLOTS.some(e => draft.photos[e].data || draft.photos[e].removed);
     const avatarChanged =
       name !== u.companionName || draft.category !== u.avatarCategory || draft.preset !== u.avatarPreset ||
-      photoChanged || JSON.stringify(draft.config) !== JSON.stringify(normalizeConfig(u.avatarConfig));
+      photoChanged;
 
     if (avatarChanged && draft.preset === 'custom') {
       const fail = (slot, text) => {
@@ -1710,8 +1520,6 @@ function bindSettings() {
         setMsg(msg, text, 'error');
       };
       if (!draft.photos.neutral.src) return fail('neutral', '「普通の顔」の写真を選んでください');
-      const bad = EYE_SLOTS.find(e => draft.photos[e].src && slotCfg(e) && draft.steps[e] < CALIB_KEYS.length);
-      if (bad) return fail(bad, `「${slotLabel(bad)}」の両目の位置をタップしてください`);
     }
 
     withBusy($('#settingsSave'), async () => {
@@ -1728,8 +1536,6 @@ function bindSettings() {
           if (Object.keys(images).length) payload.images = images;
           const removes = PHOTO_SLOTS.filter(e => draft.photos[e].removed);
           if (removes.length) payload.removeImages = removes;
-          // 写真のない表情の個別設定は送らない
-          PER_KEYS.forEach(e => { if (!draft.photos[e].src) payload.avatarConfig.perEmotion[e] = null; });
         }
         const r = await api('saveAvatar', payload);
         state.user = r.user;

@@ -453,17 +453,6 @@ input[type="range"]:disabled { opacity: .45; }
 .photo-mode.emo-sad .photo-group.fallback .photo { filter: saturate(.72) brightness(.94); }
 .photo-mode.emo-surprised .photo-group.fallback .photo { filter: contrast(1.06) brightness(1.04); }
 
-.lid { transform-origin: 50% 0; transform: scaleY(0); transition: transform .08s ease; }
-.photo-mode.emo-joy .photo-group.fallback .lid { transform: scaleY(.38); transition-duration: .3s; }
-.photo-mode.emo-sad .photo-group.fallback .lid { transform: scaleY(.3); transition-duration: .3s; }
-.avatar.photo-mode.blink .photo-group .lid { transform: scaleY(1); transition-duration: .07s; }
-
-.photo-mode .brow { transform: none; }
-.photo-mode.emo-joy .photo-group.fallback .brow { transform: translateY(-1.5px); }
-.photo-mode.emo-surprised .photo-group.fallback .brow { transform: translateY(-3px); }
-.photo-mode.emo-sad .photo-group.fallback .brow-l { transform: translateY(-.5px) rotate(-14deg); }
-.photo-mode.emo-sad .photo-group.fallback .brow-r { transform: translateY(-.5px) rotate(14deg); }
-
 /* 本物の表情写真のときは、体の動きも控えめに */
 .photo-mode.emo-sad .avatar-inner { transform: translateY(4px); }
 
