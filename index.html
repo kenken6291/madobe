@@ -265,24 +265,56 @@
           <!-- 声 -->
           <div data-spanel="voice" class="hidden">
             <p id="voiceFor" class="voice-for"></p>
-            <label class="field">
-              <span>声の種類</span>
-              <select id="voiceSelect"></select>
-            </label>
-            <p id="voiceNote" class="hint hidden">
-              この端末に日本語の声が見つかりません。Windowsは「設定 → 時刻と言語 → 音声」で日本語の音声を追加できます。Microsoft Edgeで開くと、自然な声（Nanami・Keitaなど）も選べます。
-            </p>
-            <label class="field">
-              <span>話す速さ：<output id="rateOut"></output></span>
-              <input type="range" id="voiceRate" min="0.6" max="1.6" step="0.05">
-            </label>
-            <label class="field">
-              <span>声の高さ：<output id="pitchOut"></output></span>
-              <input type="range" id="voicePitch" min="0.5" max="2" step="0.05">
-            </label>
-            <label class="check"><input type="checkbox" id="pitchAuto"> 高さはキャラクターに合わせる</label>
+
+            <div class="field">
+              <span>話す声</span>
+              <div class="seg seg2" id="engineSeg" role="radiogroup">
+                <button type="button" data-engine="gemini" role="radio">Gemini の声（おすすめ）</button>
+                <button type="button" data-engine="device" role="radio">端末の声</button>
+              </div>
+            </div>
+
+            <div id="geminiVoiceBox">
+              <label class="field">
+                <span>声の種類</span>
+                <select id="gVoiceSelect"></select>
+              </label>
+              <div class="field">
+                <span>話す速さ</span>
+                <div class="seg" id="gSpeedSeg" role="radiogroup">
+                  <button type="button" data-speed="slow" role="radio">ゆっくり</button>
+                  <button type="button" data-speed="normal" role="radio">ふつう</button>
+                  <button type="button" data-speed="fast" role="radio">はやめ</button>
+                </div>
+              </div>
+              <p class="hint">Gemini の声は、返事の気持ち（笑顔・困り顔など）に合わせて話し方が変わります。通信できないときは、自動で下の「端末の声」に切り替わります。</p>
+            </div>
+
             <div class="voice-actions">
               <button type="button" id="voiceTest" class="btn ghost">試しに聞く</button>
+            </div>
+
+            <div id="deviceVoiceBox" class="device-voice">
+              <p id="deviceTitle" class="device-title">端末の声</p>
+              <label class="field">
+                <span>声の種類</span>
+                <select id="voiceSelect"></select>
+              </label>
+              <p id="voiceNote" class="hint hidden">
+                この端末に日本語の声が見つかりません。Windowsは「設定 → 時刻と言語 → 音声」で日本語の音声を追加できます。Microsoft Edgeで開くと、自然な声（Nanami・Keitaなど）も選べます。
+              </p>
+              <label class="field">
+                <span>話す速さ：<output id="rateOut"></output></span>
+                <input type="range" id="voiceRate" min="0.6" max="1.6" step="0.05">
+              </label>
+              <label class="field">
+                <span>声の高さ：<output id="pitchOut"></output></span>
+                <input type="range" id="voicePitch" min="0.5" max="2" step="0.05">
+              </label>
+              <label class="check"><input type="checkbox" id="pitchAuto"> 高さはキャラクターに合わせる</label>
+              <div class="voice-actions">
+                <button type="button" id="deviceTest" class="btn ghost">端末の声を試しに聞く</button>
+              </div>
             </div>
           </div>
 

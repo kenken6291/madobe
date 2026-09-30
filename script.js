@@ -46,13 +46,14 @@ const store = {
 // ---- 端末ごとの設定（声・表示・聞き取り） ----
 const DEFAULT_PREFS = {
   tts: true,           // 返事を声で読み上げる
+  ttsEngine: 'gemini', // 'gemini'（Gemini TTS・標準）/ 'device'（端末の声）
   handsFree: false,    // マイクを押さずに話せる（聞き取りモード）
   micAutoSend: true,   // 話し終わったら自動で送る
   stageMode: false,    // キャラクター全画面
   showCaption: true,   // 全画面時の字幕
   hideInput: false,    // 全画面時に入力欄を隠す
   browserFs: true,     // ブラウザも全画面に
-  voices: {}           // キャラクターごとの声 { preset: {voiceURI, rate, pitch} }
+  voices: {}           // キャラクターごとの声 { preset: {gVoice, gSpeed, voiceURI, rate, pitch} }
 };
 
 function loadPrefs() {
@@ -554,7 +555,7 @@ function defaultPitch(preset, category) {
 }
 
 function voiceSettingFor(voices, preset) {
-  return Object.assign({ voiceURI: '', rate: 1, pitch: null }, voices[preset] || {});
+  return Object.assign({ gVoice: '', gSpeed: 'normal', voiceURI: '', rate: 1, pitch: null }, voices[preset] || {});
 }
 
 function resolveVoice(voices, preset, category) {
@@ -600,6 +601,139 @@ function speak(text, opts) {
 function stopSpeaking() {
   speakToken++;
   if (TTS_OK) speechSynthesis.cancel();
+  stopAudio();
+}
+
+// =========================================================
+// Gemini の声（Gemini 3.8 Flash-Lite TTS）
+// =========================================================
+
+const GEMINI_VOICES = [
+  ['Zephyr', '明るい'], ['Puck', '元気'], ['Charon', '知的'], ['Kore', 'しっかり'], ['Fenrir', '活発'],
+  ['Leda', '若々しい'], ['Orus', 'しっかり'], ['Aoede', 'さわやか'], ['Callirrhoe', 'おおらか'], ['Autonoe', '明るい'],
+  ['Enceladus', '息づかい'], ['Iapetus', 'はっきり'], ['Umbriel', 'おおらか'], ['Algieba', 'なめらか'], ['Despina', 'なめらか'],
+  ['Erinome', 'はっきり'], ['Algenib', '渋い'], ['Rasalgethi', '知的'], ['Laomedeia', '元気'], ['Achernar', 'やわらか'],
+  ['Alnilam', 'しっかり'], ['Schedar', '落ち着き'], ['Gacrux', '大人っぽい'], ['Pulcherrima', '前向き'], ['Achird', '親しみやすい'],
+  ['Zubenelgenubi', '気さく'], ['Vindemiatrix', 'やさしい'], ['Sadachbia', '生き生き'], ['Sadaltager', '物知り'], ['Sulafat', 'あたたか']
+];
+const G_VOICE_DESC = Object.fromEntries(GEMINI_VOICES);
+const DEFAULT_G_VOICE = { dog: 'Leda', cat: 'Aoede', person_f: 'Sulafat', person_m: 'Achird', anime_g: 'Laomedeia', anime_b: 'Puck' };
+const CUSTOM_G_VOICE = { pet: 'Leda', person: 'Vindemiatrix', anime: 'Laomedeia' };
+
+function defaultGVoice(preset, category) {
+  return preset === 'custom' ? (CUSTOM_G_VOICE[category] || 'Leda') : (DEFAULT_G_VOICE[preset] || 'Leda');
+}
+
+/** サーバーへ渡す Gemini の声の指定 */
+function geminiTtsOpts(voices, preset, category) {
+  const s = voiceSettingFor(voices, preset);
+  return { voice: s.gVoice || defaultGVoice(preset, category), speed: s.gSpeed || 'normal' };
+}
+
+function useGeminiVoice() { return prefs.tts && prefs.ttsEngine === 'gemini'; }
+
+// ---- 再生（Web Audio）と、音量に合わせた口パク ----
+let audioCtx = null;
+let curSource = null;
+let lipRAF = 0;
+
+function ensureAudioCtx() {
+  try {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    return audioCtx;
+  } catch (_) {
+    return null;
+  }
+}
+// ブラウザの自動再生制限のため、最初の操作で音声の準備をしておく
+['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
+  document.addEventListener(ev, ensureAudioCtx, { capture: true, passive: true }));
+
+function b64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u.buffer;
+}
+
+/** 音声データ → 再生できる形に。使えないときは null */
+async function prepareAudio(audio) {
+  if (!audio || !audio.data) return null;
+  const ctx = ensureAudioCtx();
+  if (!ctx) return null;
+  if (ctx.state !== 'running') {
+    try { await Promise.race([ctx.resume(), sleep(400)]); } catch (_) { /* 無視 */ }
+    if (ctx.state !== 'running') return null;
+  }
+  try {
+    return await ctx.decodeAudioData(b64ToArrayBuffer(audio.data));
+  } catch (_) {
+    return null;
+  }
+}
+
+function playBuffer(buf, avatar) {
+  return new Promise(resolve => {
+    stopAudio();
+    const ctx = audioCtx;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const an = ctx.createAnalyser();
+    an.fftSize = 1024;
+    src.connect(an);
+    an.connect(ctx.destination);
+    curSource = src;
+
+    const data = new Uint8Array(an.fftSize);
+    let smooth = 0;
+    avatar.startTalking();
+    const tick = () => {
+      an.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) { const x = (data[i] - 128) / 128; sum += x * x; }
+      const level = Math.min(1, Math.sqrt(sum / data.length) * 7);
+      smooth = smooth * 0.45 + level * 0.55;
+      avatar.setMouth(0.08 + smooth * 0.92);
+      lipRAF = requestAnimationFrame(tick);
+    };
+    tick();
+
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      cancelAnimationFrame(lipRAF);
+      clearTimeout(guard);
+      avatar.stopTalking();
+      if (curSource === src) curSource = null;
+      resolve();
+    };
+    const guard = setTimeout(finish, buf.duration * 1000 + 2000);
+    src.onended = finish;
+    src._finish = finish;
+    src.start();
+  });
+}
+
+function stopAudio() {
+  if (curSource) {
+    const s = curSource;
+    curSource = null;
+    try { s.stop(); } catch (_) { /* 無視 */ }
+    if (s._finish) s._finish();
+  }
+}
+
+let fallbackNoted = false;
+function noteFallback() {
+  if (fallbackNoted) return;
+  fallbackNoted = true;
+  toast('Gemini の声が使えないため、端末の声でお話しします');
 }
 
 // =========================================================
@@ -956,7 +1090,7 @@ function addTyping() {
   return wrap;
 }
 
-async function typewriter(targets, text, lips, rate = 1) {
+async function typewriter(targets, text, lips, rate = 1, perChar = 0) {
   if (lips) mainAvatar.startTalking();
   const base = prefs.tts && TTS_OK ? 150 / rate : 55;
   for (const ch of [...text]) {
@@ -964,13 +1098,18 @@ async function typewriter(targets, text, lips, rate = 1) {
     targets.forEach(t => { t.textContent += ch; });
     if (lips) mainAvatar.mouthFor(ch);
     scrollChat();
-    await sleep(/[。！？!?\n]/.test(ch) ? base * 3 : /[、,…]/.test(ch) ? base * 2 : base);
+    // perChar 指定時（Gemini の声）は、音声の長さに合わせて均等に表示
+    await sleep(perChar || (/[。！？!?\n]/.test(ch) ? base * 3 : /[、,…]/.test(ch) ? base * 2 : base));
   }
   if (lips) mainAvatar.stopTalking();
   scrollChat();
 }
 
-async function presentReply(text, emotion) {
+/**
+ * 返事を表示して話す
+ * audio: Gemini の声（サーバーで作った WAV の base64）。ない・使えないときは端末の声に切り替え
+ */
+async function presentReply(text, emotion, audio) {
   state.skipTyping = false;
   state.speaking = true;
   mainAvatar.setEmotion(emotion);
@@ -979,7 +1118,24 @@ async function presentReply(text, emotion) {
   cap.textContent = '';
   setStatus('話しています');
   try {
-    if (prefs.tts && TTS_OK) {
+    let mode = !prefs.tts ? 'none' : prefs.ttsEngine === 'gemini' ? 'gemini' : 'device';
+    let buf = null;
+    if (mode === 'gemini') {
+      buf = await prepareAudio(audio);
+      if (!buf) {
+        const blocked = audio && audio.data && audioCtx && audioCtx.state !== 'running';
+        if (!blocked) noteFallback();
+        mode = TTS_OK && !blocked ? 'device' : 'none';
+      }
+    }
+    if (mode === 'device' && !TTS_OK) mode = 'none';
+
+    if (mode === 'gemini') {
+      const perChar = Math.max(35, Math.min(260, (buf.duration * 1000) / Math.max(1, [...text].length)));
+      const played = playBuffer(buf, mainAvatar);
+      await typewriter([bubble, cap], text, false, 1, perChar);
+      await played;
+    } else if (mode === 'device') {
       const { rate } = resolveVoice(prefs.voices, curPreset(), curCategory());
       const spoken = speak(text);
       mainAvatar.startFlap();
@@ -1017,9 +1173,12 @@ async function sendMessage(textArg) {
   setStatus('考えています…');
 
   try {
-    const r = await api('chat', { message: text });
+    ensureAudioCtx();
+    const payload = { message: text };
+    if (useGeminiVoice()) payload.tts = geminiTtsOpts(prefs.voices, curPreset(), curCategory());
+    const r = await api('chat', payload);
     typing.remove();
-    await presentReply(r.reply, r.emotion);
+    await presentReply(r.reply, r.emotion, r.audio);
   } catch (err) {
     typing.remove();
     addMessage('system', err.message);
@@ -1033,11 +1192,21 @@ async function sendMessage(textArg) {
   }
 }
 
-function greet() {
+async function greet() {
   const u = state.user;
   const h = new Date().getHours();
   const hello = h < 5 ? 'こんばんは' : h < 11 ? 'おはよう' : h < 18 ? 'こんにちは' : 'こんばんは';
-  return presentReply(`${u.name}さん、${hello}！ ${u.companionName}です。今日はどんな一日でしたか？`, 'joy');
+  const text = `${u.name}さん、${hello}！ ${u.companionName}です。今日はどんな一日でしたか？`;
+  let audio = null;
+  if (useGeminiVoice()) {
+    const typing = addTyping();
+    try {
+      const r = await api('tts', Object.assign({ text, emotion: 'joy' }, geminiTtsOpts(prefs.voices, curPreset(), curCategory())));
+      audio = r.audio;
+    } catch (_) { /* 端末の声に切り替え */ }
+    typing.remove();
+  }
+  return presentReply(text, 'joy', audio);
 }
 
 async function loadHistory() {
@@ -1195,6 +1364,7 @@ function openSettings(tab = 'char') {
     slot: 'neutral',
     config: Object.assign(defaultConfig(), u.avatarConfig || {}),
     voices: JSON.parse(JSON.stringify(prefs.voices || {})),
+    engine: prefs.ttsEngine || 'gemini',
     view: VIEW_KEYS.reduce((o, k) => (o[k] = prefs[k], o), {})
   });
   $('#companionName').value = draft.companionName;
@@ -1362,6 +1532,28 @@ function renderVoicePanel() {
   const name = $('#companionName').value.trim() || draft.companionName;
   $('#voiceFor').textContent = `「${name}」（${presetLabel(key)}）の声を設定します。キャラクターごとに覚えます。`;
 
+  // Gemini の声
+  const isG = draft.engine === 'gemini';
+  $$('#engineSeg button').forEach(b => b.setAttribute('aria-checked', String(b.dataset.engine === draft.engine)));
+  $('#geminiVoiceBox').classList.toggle('hidden', !isG);
+  $('#voiceTest').classList.toggle('hidden', !isG);
+  $('#deviceTitle').textContent = isG ? '予備の声（端末の声）— Gemini の声が使えないときに使います' : '端末の声';
+  const gsel = $('#gVoiceSelect');
+  gsel.innerHTML = '';
+  const def = defaultGVoice(key, draft.category);
+  const oAuto = document.createElement('option');
+  oAuto.value = '';
+  oAuto.textContent = `おまかせ（${def}・${G_VOICE_DESC[def]}）`;
+  gsel.appendChild(oAuto);
+  GEMINI_VOICES.forEach(([v, d]) => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = `${v}（${d}）`;
+    gsel.appendChild(o);
+  });
+  gsel.value = G_VOICE_DESC[s.gVoice] ? s.gVoice : '';
+  $$('#gSpeedSeg button').forEach(b => b.setAttribute('aria-checked', String(b.dataset.speed === (s.gSpeed || 'normal'))));
+
   const sel = $('#voiceSelect');
   sel.innerHTML = '';
   const auto = autoVoice(key);
@@ -1486,14 +1678,46 @@ function bindSettings() {
     }
     renderVoicePanel();
   });
-  $('#voiceTest').addEventListener('click', async () => {
-    if (!TTS_OK) return setMsg($('#settingsMsg'), 'このブラウザは読み上げに対応していません', 'error');
+  $$('#engineSeg button').forEach(b => b.addEventListener('click', () => {
+    draft.engine = b.dataset.engine;
+    renderVoicePanel();
+  }));
+  $('#gVoiceSelect').addEventListener('change', e => setDraftVoice({ gVoice: e.target.value }));
+  $$('#gSpeedSeg button').forEach(b => b.addEventListener('click', () => {
+    setDraftVoice({ gSpeed: b.dataset.speed });
+    renderVoicePanel();
+  }));
+
+  const sampleText = () => {
     const name = $('#companionName').value.trim() || draft.companionName;
+    return `こんにちは、${name}です。今日もいっしょにお話ししようね。`;
+  };
+  const deviceTest = async () => {
+    if (!TTS_OK) return setMsg($('#settingsMsg'), 'このブラウザは端末の声に対応していません', 'error');
     previewAvatar.startFlap();
-    await speak(`こんにちは、${name}です。今日もいっしょにお話ししようね。`,
-      { voices: draft.voices, preset: draft.preset, category: draft.category });
+    await speak(sampleText(), { voices: draft.voices, preset: draft.preset, category: draft.category });
     previewAvatar.stopTalking();
+  };
+
+  // Gemini の声を試す（失敗したら端末の声で）
+  $('#voiceTest').addEventListener('click', () => {
+    ensureAudioCtx();
+    stopSpeaking();
+    withBusy($('#voiceTest'), async () => {
+      setMsg($('#settingsMsg'), '');
+      let buf = null;
+      try {
+        const r = await api('tts', Object.assign({ text: sampleText(), emotion: 'joy' },
+          geminiTtsOpts(draft.voices, draft.preset, draft.category)));
+        buf = await prepareAudio(r.audio);
+      } catch (err) {
+        setMsg($('#settingsMsg'), `Gemini の声を作れませんでした（${err.message}）。端末の声で再生します。`, 'error');
+      }
+      if (buf) await playBuffer(buf, previewAvatar);
+      else await deviceTest();
+    }, $('#settingsMsg'));
   });
+  $('#deviceTest').addEventListener('click', () => { stopSpeaking(); deviceTest(); });
 
   // 表示と会話
   VIEW_KEYS.forEach(k => $(VIEW_IDS[k]).addEventListener('change', e => { draft.view[k] = e.target.checked; }));
@@ -1544,6 +1768,7 @@ function bindSettings() {
 
       const wasStage = prefs.stageMode;
       prefs.voices = draft.voices;
+      prefs.ttsEngine = draft.engine;
       VIEW_KEYS.forEach(k => { prefs[k] = draft.view[k]; });
       savePrefs();
       if (!prefs.tts) stopSpeaking();

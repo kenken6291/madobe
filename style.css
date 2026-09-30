@@ -567,7 +567,11 @@ input[type="range"]:disabled { opacity: .45; }
 
 /* 声 */
 .voice-for { font-weight: 700; margin: 0 0 14px; }
-.voice-actions { margin-top: 16px; }
+.voice-actions { margin: 4px 0 16px; }
+.seg.seg2 { grid-template-columns: 1fr 1fr; }
+.seg button[aria-checked="true"] { color: var(--ink); }
+.device-voice { border-top: 1px dashed var(--line); padding-top: 14px; margin-top: 6px; }
+.device-title { font-weight: 700; margin: 0 0 10px; }
 output { color: var(--ink); font-weight: 700; }
 
 /* 表示と会話 */
