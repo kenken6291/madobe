@@ -266,13 +266,10 @@
           <div data-spanel="voice" class="hidden">
             <p id="voiceFor" class="voice-for"></p>
 
-            <div class="field">
-              <span>話す声</span>
-              <div class="seg seg2" id="engineSeg" role="radiogroup">
-                <button type="button" data-engine="gemini" role="radio">Gemini の声（おすすめ）</button>
-                <button type="button" data-engine="device" role="radio">端末の声</button>
-              </div>
-            </div>
+            <label class="opt gemini-switch">
+              <input type="checkbox" class="switch" id="optGemini">
+              <span><strong>Gemini の声（gemini-3.8-flash-tts）を使う</strong><small>オンにすると、表現ゆたかな Gemini の声で話します（返事が少し遅くなり、API の利用量が増えます）。オフのときは端末の声で話し、Gemini には会話だけを送ります。</small></span>
+            </label>
 
             <div id="geminiVoiceBox">
               <label class="field">
@@ -288,6 +285,49 @@
                 </div>
               </div>
               <p class="hint">Gemini の声は、返事の気持ち（笑顔・困り顔など）に合わせて話し方が変わります。通信できないときは、自動で下の「端末の声」に切り替わります。</p>
+              <button type="button" id="deleteVoiceBtn" class="link-btn hidden">選んでいる「作った声」を削除する</button>
+
+              <!-- サンプルから声を作る -->
+              <details id="voiceMaker" class="voice-maker">
+                <summary>サンプルの声に近い声を作る</summary>
+
+                <div class="seg seg2" id="makerModeSeg" role="radiogroup">
+                  <button type="button" data-mode="similar" role="radio">似た声を作る</button>
+                  <button type="button" data-mode="replica" role="radio">本人の声を再現</button>
+                </div>
+                <p id="makerModeHint" class="hint"></p>
+
+                <div class="maker-step">
+                  <p class="maker-label">① 声のサンプル（<span id="sampleRange">3〜30</span>秒）</p>
+                  <div class="maker-actions">
+                    <button type="button" id="recSampleBtn" class="btn ghost">🎙 録音する</button>
+                    <label class="btn ghost file-btn">
+                      ファイルを選ぶ
+                      <input type="file" id="sampleFile" accept="audio/*,video/mp4" hidden>
+                    </label>
+                    <button type="button" id="playSampleBtn" class="link-btn hidden">▶ 聞き直す</button>
+                  </div>
+                  <p id="sampleStatus" class="maker-status"></p>
+                </div>
+
+                <div id="consentStep" class="maker-step hidden">
+                  <p class="maker-label">② 同意の録音（声の本人が読み上げます）</p>
+                  <p class="consent-phrase">「私はこの音声の所有者であり、Googleがこの音声を使用して音声合成モデルを作成することを承認します。」</p>
+                  <div class="maker-actions">
+                    <button type="button" id="recConsentBtn" class="btn ghost">🎙 同意の文を録音</button>
+                    <button type="button" id="playConsentBtn" class="link-btn hidden">▶ 聞き直す</button>
+                  </div>
+                  <p id="consentStatus" class="maker-status"></p>
+                  <label class="check"><input type="checkbox" id="consentAgree"> 私は声の本人（18歳以上）です。または、本人がこの場で同意して録音しています。</label>
+                </div>
+
+                <label class="field">
+                  <span>声の名前</span>
+                  <input type="text" id="makerLabel" maxlength="20" placeholder="例：やさしい声">
+                </label>
+                <button type="button" id="makeVoiceBtn" class="btn primary">この声を作る</button>
+                <p class="hint">作った声はこのアカウントで最大3つまで使えます。声のサンプルと同意の録音は、声を作るためだけに Google に送られ、まどべには保存しません。</p>
+              </details>
             </div>
 
             <div class="voice-actions">

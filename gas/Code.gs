@@ -9,7 +9,10 @@
  *   DRIVE_FOLDER_ID  : アバター画像を保存する Drive フォルダID
  *   PASSWORD_PEPPER  : 任意の長いランダム文字列（パスワードハッシュ用）
  * スクリプトプロパティ（任意）
- *   GEMINI_MODEL     : 既定 gemini-2.5-flash
+ *   GEMINI_MODEL     : 会話モデル（既定 gemini-2.5-flash）
+ *   TTS_MODEL        : 声のモデル（既定 gemini-3.8-flash-tts）
+ *                      ※設定画面で「Gemini の声」をオンにした人だけ使用。オフの人は端末の声で話し、
+ *                        Gemini には会話（GEMINI_MODEL）だけを送る
  *   APP_URL          : メール本文に載せるアプリURL（未設定なら DEFAULT_APP_URL）
  *   SPREADSHEET_ID   : スタンドアロンGASの場合のみ
  */
@@ -24,7 +27,7 @@ const USER_HEADERS = [
   'companionName', 'avatarCategory', 'avatarPreset',
   'avatarImageUrl', 'avatarImageId', 'avatarConfig',
   'failedCount', 'lockedUntil', 'createdAt', 'lastLoginAt',
-  'avatarImages'
+  'avatarImages', 'customVoices'
 ];
 const HISTORY_HEADERS = ['timestamp', 'userId', 'role', 'text', 'emotion'];
 
@@ -68,6 +71,10 @@ function doPost(e) {
       saveAvatar: saveAvatar_,
       chat: chat_,
       getHistory: getHistory_,
+      tts: tts_,
+      createSimilarVoice: createSimilarVoice_,
+      createReplicaVoice: createReplicaVoice_,
+      deleteVoice: deleteVoice_,
       clearHistory: clearHistory_
     };
     const fn = handlers[req.action];
@@ -268,7 +275,10 @@ function publicUser_(u) {
       IMAGE_KEYS.forEach(function (e) { o[e] = imgs[e].url; });
       return o;
     })(),
-    avatarConfig: parseConfig_(u.avatarConfig)
+    avatarConfig: parseConfig_(u.avatarConfig),
+    customVoices: parseVoices_(u.customVoices).map(function (v) {
+      return { id: v.id, label: v.label, type: v.type, summary: v.summary || '' };
+    })
   };
 }
 
@@ -349,6 +359,7 @@ function register_(req) {
     };
     sendTempPasswordMail_(email, name, temp, false); // 送信成功後に登録
     user.avatarImages = '{}';
+    user.customVoices = '[]';
     const us = sheet_(SHEET_USERS);
     const headers = us.getRange(1, 1, 1, us.getLastColumn()).getValues()[0];
     us.appendRow(headers.map(function (h) { return user[h] == null ? '' : user[h]; }));
@@ -508,7 +519,18 @@ function chat_(req) {
   } finally {
     lock.releaseLock();
   }
-  return { reply: reply.reply, emotion: reply.emotion };
+  // 声（Gemini TTS）：失敗しても会話は返す（フロントが端末の声に切り替える）
+  let audio = null;
+  let ttsError = '';
+  if (req.tts && typeof req.tts === 'object') {
+    try {
+      audio = synthesize_(reply.reply, reply.emotion, ttsVoiceFor_(user, req.tts.voice), req.tts.speed);
+    } catch (e) {
+      ttsError = String((e && e.message) || e);
+      console.error('TTS error: ' + ttsError);
+    }
+  }
+  return { reply: reply.reply, emotion: reply.emotion, audio: audio, ttsError: ttsError };
 }
 
 function getRecentHistory_(userId, limit) {
@@ -693,10 +715,288 @@ function parseReply_(raw) {
   return { reply: text.slice(0, 400), emotion: 'neutral' };
 }
 
+// ================= 声（Gemini TTS） =================
+
+const TTS_VOICES = [
+  'Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir', 'Leda', 'Orus', 'Aoede', 'Callirrhoe', 'Autonoe',
+  'Enceladus', 'Iapetus', 'Umbriel', 'Algieba', 'Despina', 'Erinome', 'Algenib', 'Rasalgethi', 'Laomedeia', 'Achernar',
+  'Alnilam', 'Schedar', 'Gacrux', 'Pulcherrima', 'Achird', 'Zubenelgenubi', 'Vindemiatrix', 'Sadachbia', 'Sadaltager', 'Sulafat'
+];
+const DEFAULT_TTS_VOICE = { dog: 'Leda', cat: 'Aoede', person_f: 'Sulafat', person_m: 'Achird', anime_g: 'Laomedeia', anime_b: 'Puck' };
+const CUSTOM_TTS_VOICE = { pet: 'Leda', person: 'Vindemiatrix', anime: 'Laomedeia' };
+const EMOTION_STYLE = {
+  joy: 'cheerful, warm and friendly',
+  neutral: 'calm, warm and friendly',
+  sad: 'gentle, soft and caring',
+  surprised: 'surprised and lively'
+};
+
+function ttsVoiceFor_(user, voice) {
+  if (TTS_VOICES.indexOf(voice) >= 0) return voice;
+  // 自分で作った声（他の人の声IDは使わせない）
+  if (/^voice_[\w-]+$/.test(String(voice || '')) &&
+      parseVoices_(user.customVoices).some(function (v) { return v.id === voice; })) {
+    return voice;
+  }
+  const p = String(user.avatarPreset);
+  return p === 'custom' ? (CUSTOM_TTS_VOICE[user.avatarCategory] || 'Leda') : (DEFAULT_TTS_VOICE[p] || 'Leda');
+}
+
+/** 文章を音声（WAV・16kHz・base64）にする */
+function ttsModel_() {
+  return props_().getProperty('TTS_MODEL') || 'gemini-3.8-flash-tts';
+}
+
+function synthesize_(text, emotion, voice, speed) {
+  const key = props_().getProperty('GEMINI_API_KEY');
+  if (!key) throw new Error('GEMINI_API_KEY が未設定です');
+  const model = ttsModel_();
+
+  const t = String(text || '')
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F\u200D]/gu, '')
+    .trim().slice(0, 800);
+  if (!t) throw new Error('読み上げる文章がありません');
+
+  let style = EMOTION_STYLE[emotion] || EMOTION_STYLE.neutral;
+  if (speed === 'slow') style += ', speaking slowly';
+  else if (speed === 'fast') style += ', speaking a little quickly';
+
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: t, speech_metadata: { style: style } }] }],
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      responseFormat: { audio: { mimeType: 'AUDIO_WAV', sampleRate: 16000 } },
+      speechConfig: { voiceConfig: { voice: (TTS_VOICES.indexOf(voice) >= 0 || /^voice_[\w-]+$/.test(String(voice))) ? voice : 'Leda' } }
+    }
+  };
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-goog-api-key': key },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  let res, code;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    res = UrlFetchApp.fetch(url, options);
+    code = res.getResponseCode();
+    if (code !== 429 && code !== 503 && code !== 500) break;
+    Utilities.sleep(1000);
+  }
+  if (code !== 200) {
+    console.error('TTS ' + code + ': ' + res.getContentText().slice(0, 500));
+    throw new Error('音声を作れませんでした（' + code + '）');
+  }
+  const data = JSON.parse(res.getContentText());
+  const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+  const part = parts.filter(function (p) { return p.inlineData && p.inlineData.data; })[0];
+  if (!part) throw new Error('音声データが返りませんでした');
+  return { data: part.inlineData.data, mimeType: part.inlineData.mimeType || 'audio/wav', model: model };
+}
+
+/** あいさつ・声の試し聞き用 */
+function tts_(req) {
+  const user = auth_(req, false);
+  const text = String(req.text || '').trim();
+  if (!text) throw new Error('文章がありません');
+  if (text.length > 300) throw new Error('文章が長すぎます');
+  const emotion = EMOTIONS.indexOf(req.emotion) >= 0 ? req.emotion : 'neutral';
+  const audio = synthesize_(text, emotion, ttsVoiceFor_(user, req.voice), req.speed);
+  return { audio: audio, model: audio.model };
+}
+
+// ================= サンプルから声を作る（Voice design / Voice replication） =================
+
+const MAX_CUSTOM_VOICES = 3; // 1人あたり（プロジェクト全体の上限は200）
+
+function parseVoices_(v) {
+  try {
+    const a = JSON.parse(v || '[]');
+    return Array.isArray(a) ? a.filter(function (x) { return x && /^voice_[\w-]+$/.test(String(x.id)); }) : [];
+  } catch (e) { return []; }
+}
+
+function checkWav_(b64, minSec, maxSec, label) {
+  const s = String(b64 || '');
+  if (!/^[A-Za-z0-9+/=]+$/.test(s)) throw new Error(label + 'の音声データが正しくありません');
+  const bytes = Math.floor(s.length * 3 / 4);
+  if (bytes > 4 * 1024 * 1024) throw new Error(label + 'が長すぎます');
+  const sec = (bytes - 44) / (24000 * 2); // 24kHz・モノラル・16bit
+  if (sec < minSec - 0.5) throw new Error(label + 'は' + minSec + '秒以上録音してください');
+  if (sec > maxSec + 1) throw new Error(label + 'は' + maxSec + '秒以内にしてください');
+  return s;
+}
+
+function voicesApi_(method, path, body) {
+  const key = props_().getProperty('GEMINI_API_KEY');
+  const options = { method: method, headers: { 'x-goog-api-key': key }, muteHttpExceptions: true };
+  if (body) { options.contentType = 'application/json'; options.payload = JSON.stringify(body); }
+  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/voices' + (path || ''), options);
+  const code = res.getResponseCode();
+  const text = res.getContentText();
+  if (code >= 300) {
+    console.error('Voices API ' + code + ': ' + text.slice(0, 800));
+    const err = new Error('声を作れませんでした（' + code + '）');
+    err.status = code;
+    err.detail = text;
+    throw err;
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+function voiceIdOf_(data) {
+  const id = data.id || (data.voice && data.voice.id) || (data.name ? String(data.name).split('/').pop() : '');
+  if (!/^voice_[\w-]+$/.test(String(id))) throw new Error('声のIDを受け取れませんでした');
+  return id;
+}
+
+function addCustomVoice_(user, v) {
+  const list = parseVoices_(user.customVoices);
+  list.push(v);
+  updateUser_(user, { customVoices: JSON.stringify(list) });
+  return list;
+}
+
+function checkVoiceSlot_(user) {
+  if (parseVoices_(user.customVoices).length >= MAX_CUSTOM_VOICES) {
+    throw new Error('作れる声は' + MAX_CUSTOM_VOICES + 'つまでです。使わない声を削除してから作ってください');
+  }
+}
+
+/** 声のサンプルを Gemini に聞かせて、声の特徴を文章にする */
+function describeVoice_(b64) {
+  const key = props_().getProperty('GEMINI_API_KEY');
+  const model = props_().getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
+  const prompt = [
+    'Listen to the voice in this audio clip.',
+    'Describe ONLY its general vocal characteristics so that a text-to-speech voice designer can create a similar-sounding voice:',
+    'approximate age range, perceived gender, pitch, timbre and texture, speaking pace, warmth and energy, and accent (for example standard Japanese or a regional dialect).',
+    'Do not try to identify who the speaker is, and do not mention names.',
+    'description: 1-2 concise English sentences, e.g. "A calm woman in her 60s with a soft, slightly low voice, speaking slowly and warmly in standard Japanese."',
+    'summaryJa: the same description as one natural Japanese sentence.',
+    'gender: female, male, or neutral.',
+    'isSpeech: false if there is no clear human speech in the clip.'
+  ].join('\n');
+  const payload = {
+    contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data: b64 } }, { text: prompt }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          description: { type: 'STRING' },
+          summaryJa: { type: 'STRING' },
+          gender: { type: 'STRING', enum: ['female', 'male', 'neutral'] },
+          isSpeech: { type: 'BOOLEAN' }
+        },
+        required: ['description', 'summaryJa', 'gender', 'isSpeech']
+      }
+    }
+  };
+  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+    method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
+    payload: JSON.stringify(payload), muteHttpExceptions: true
+  });
+  if (res.getResponseCode() !== 200) {
+    console.error('describeVoice ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 500));
+    throw new Error('声の特徴を読み取れませんでした（' + res.getResponseCode() + '）');
+  }
+  const data = JSON.parse(res.getContentText());
+  const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+  const raw = parts.filter(function (p) { return p.text && !p.thought; }).map(function (p) { return p.text; }).join('');
+  const o = JSON.parse(String(raw).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, ''));
+  if (!o.isSpeech) throw new Error('はっきりした話し声が聞き取れませんでした。静かな場所で録音しなおしてください');
+  return o;
+}
+
+/** サンプルに「似た声」を作る：声の特徴を文章にして Voice design で新しい声を作る */
+function createSimilarVoice_(req) {
+  const user = auth_(req, false);
+  checkVoiceSlot_(user);
+  const b64 = checkWav_(req.sample, 3, 30, '声のサンプル');
+  const label = String(req.label || '').trim().slice(0, 20) || '似た声';
+  const d = describeVoice_(b64);
+
+  const data = voicesApi_('post', '', {
+    store: true,
+    voice: {
+      model: ttsModel_(),
+      type: 'prompted',
+      display_name: 'madobe ' + label,
+      gender: d.gender,
+      language_code: 'ja-JP',
+      prompted: { input: String(d.description).slice(0, 500) }
+    }
+  });
+  const id = voiceIdOf_(data);
+  const v = { id: id, label: safe_(label), type: 'similar', summary: safe_(String(d.summaryJa).slice(0, 120)), createdAt: new Date().toISOString() };
+  addCustomVoice_(user, v);
+  const sa = data.sample_audio || data.sampleAudio;
+  return {
+    user: publicUser_(user),
+    voice: { id: v.id, label: v.label, type: v.type, summary: v.summary },
+    sampleAudio: sa && sa.data ? { data: sa.data, mimeType: sa.mime_type || sa.mimeType || 'audio/wav' } : null
+  };
+}
+
+/** 本人の声を再現する：本人の声サンプル＋同意の録音（Google が同一人物か確認） */
+function createReplicaVoice_(req) {
+  const user = auth_(req, false);
+  checkVoiceSlot_(user);
+  if (req.agree !== true) throw new Error('本人の同意の確認にチェックを入れてください');
+  const sample = checkWav_(req.sample, 10, 30, '声のサンプル');
+  const consent = checkWav_(req.consent, 3, 20, '同意の録音');
+  const label = String(req.label || '').trim().slice(0, 20) || '本人の声';
+
+  let data;
+  try {
+    data = voicesApi_('post', '', {
+      store: true,
+      voice: {
+        model: ttsModel_(),
+        type: 'replicated',
+        display_name: 'madobe ' + label,
+        replicated: {
+          source_audio: { mime_type: 'audio/wav', data: sample },
+          consent_audio: { mime_type: 'audio/wav', data: consent }
+        }
+      }
+    });
+  } catch (e) {
+    if (e.status === 400 || e.status === 403) {
+      throw new Error('同意の録音と声のサンプルが同じ人だと確認できませんでした。同じ人が、同じ場所・同じマイクで、同意の文をはっきり読み上げて録音しなおしてください');
+    }
+    throw e;
+  }
+  const id = voiceIdOf_(data);
+  const v = { id: id, label: safe_(label), type: 'replica', summary: '', createdAt: new Date().toISOString() };
+  addCustomVoice_(user, v);
+  return { user: publicUser_(user), voice: { id: v.id, label: v.label, type: v.type, summary: '' } };
+}
+
+function deleteVoice_(req) {
+  const user = auth_(req, false);
+  const id = String(req.id || '');
+  const list = parseVoices_(user.customVoices);
+  if (!list.some(function (v) { return v.id === id; })) throw new Error('その声は見つかりません');
+  try { voicesApi_('delete', '/' + encodeURIComponent(id)); } catch (e) { if (e.status !== 404) throw e; }
+  const rest = list.filter(function (v) { return v.id !== id; });
+  updateUser_(user, { customVoices: JSON.stringify(rest) });
+  return { user: publicUser_(user) };
+}
+
 // ================= 動作確認用 =================
 
 /** エディタから実行して Gemini 接続を確認 */
 function testGemini() {
   const dummy = { name: 'テスト', companionName: 'ポチ', avatarPreset: 'dog', avatarCategory: 'pet' };
   Logger.log(JSON.stringify(callGemini_(dummy, [], '今日はちょっと疲れちゃった')));
+}
+
+/** エディタから実行して音声（TTS）接続を確認 */
+function testTts() {
+  const a = synthesize_('こんにちは。今日もいっしょにお話ししようね。', 'joy', 'Leda', 'normal');
+  Logger.log(a.model + ' / ' + a.mimeType + ' / base64 ' + a.data.length + ' 文字');
 }

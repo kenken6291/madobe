@@ -46,7 +46,7 @@ const store = {
 // ---- 端末ごとの設定（声・表示・聞き取り） ----
 const DEFAULT_PREFS = {
   tts: true,           // 返事を声で読み上げる
-  ttsEngine: 'gemini', // 'gemini'（Gemini TTS・標準）/ 'device'（端末の声）
+  ttsEngine: 'gemini', // 'gemini'：Gemini の声（gemini-3.8-flash-tts）/ 'device'：端末の声（Gemini には会話だけ送る）
   handsFree: false,    // マイクを押さずに話せる（聞き取りモード）
   micAutoSend: true,   // 話し終わったら自動で送る
   stageMode: false,    // キャラクター全画面
@@ -1379,6 +1379,7 @@ function openSettings(tab = 'char') {
 }
 
 function closeSettings() {
+  if (maker.rec) maker.rec.stop();
   stopSpeaking();
   previewAvatar.stop();
   closeModal('settingsModal');
@@ -1534,10 +1535,10 @@ function renderVoicePanel() {
 
   // Gemini の声
   const isG = draft.engine === 'gemini';
-  $$('#engineSeg button').forEach(b => b.setAttribute('aria-checked', String(b.dataset.engine === draft.engine)));
+  $('#optGemini').checked = isG;
   $('#geminiVoiceBox').classList.toggle('hidden', !isG);
   $('#voiceTest').classList.toggle('hidden', !isG);
-  $('#deviceTitle').textContent = isG ? '予備の声（端末の声）— Gemini の声が使えないときに使います' : '端末の声';
+  $('#deviceTitle').textContent = isG ? '予備の声（端末の声）— Gemini の声が使えないときに使います' : '端末の声（いまはこの声で話します）';
   const gsel = $('#gVoiceSelect');
   gsel.innerHTML = '';
   const def = defaultGVoice(key, draft.category);
@@ -1551,7 +1552,23 @@ function renderVoicePanel() {
     o.textContent = `${v}（${d}）`;
     gsel.appendChild(o);
   });
-  gsel.value = G_VOICE_DESC[s.gVoice] ? s.gVoice : '';
+  // サンプルから作った声
+  const customs = (state.user && state.user.customVoices) || [];
+  if (customs.length) {
+    const og = document.createElement('optgroup');
+    og.label = '作った声';
+    customs.forEach(v => {
+      const o = document.createElement('option');
+      o.value = v.id;
+      o.textContent = `${v.label}（${v.type === 'replica' ? '本人の声' : '似た声'}）`;
+      og.appendChild(o);
+    });
+    gsel.insertBefore(og, gsel.children[1] || null);
+  }
+  const validVoice = G_VOICE_DESC[s.gVoice] || customs.some(v => v.id === s.gVoice);
+  gsel.value = validVoice ? s.gVoice : '';
+  $('#deleteVoiceBtn').classList.toggle('hidden', !customs.some(v => v.id === gsel.value));
+  renderMaker();
   $$('#gSpeedSeg button').forEach(b => b.setAttribute('aria-checked', String(b.dataset.speed === (s.gSpeed || 'normal'))));
 
   const sel = $('#voiceSelect');
@@ -1590,6 +1607,189 @@ function rateLabel(r) {
 function setDraftVoice(patch) {
   const k = draft.preset;
   draft.voices[k] = Object.assign(voiceSettingFor(draft.voices, k), patch);
+}
+
+// ---- サンプルから声を作る ----
+
+const maker = { mode: 'similar', sample: null, consent: null, rec: null };
+
+function renderMaker() {
+  const isRep = maker.mode === 'replica';
+  $$('#makerModeSeg button').forEach(b => b.setAttribute('aria-checked', String(b.dataset.mode === maker.mode)));
+  $('#makerModeHint').textContent = isRep
+    ? '声の本人が、声のサンプルと「同意の文」の両方を録音します。Google が同じ人の声か確認してから、その人の声をそっくり再現します。本人の同意がない声（有名人や、ほかの人の録音など）には使えません。'
+    : '声のサンプルを Gemini が聞いて「年代・高さ・話し方」などの特徴をつかみ、それに近い新しい声を作ります（そっくりそのままではありません）。';
+  $('#sampleRange').textContent = isRep ? '10〜30' : '3〜30';
+  $('#consentStep').classList.toggle('hidden', !isRep);
+  $('#sampleStatus').textContent = maker.sample ? `${maker.sample.sec.toFixed(1)}秒の音声を準備しました` : '';
+  $('#sampleStatus').classList.toggle('ok', !!maker.sample);
+  $('#playSampleBtn').classList.toggle('hidden', !maker.sample);
+  $('#consentStatus').textContent = maker.consent ? `${maker.consent.sec.toFixed(1)}秒の同意の録音を準備しました` : '';
+  $('#consentStatus').classList.toggle('ok', !!maker.consent);
+  $('#playConsentBtn').classList.toggle('hidden', !maker.consent);
+}
+
+/** 音声（録音・ファイル）→ 24kHz・モノラル・16bit の WAV（base64）に変換 */
+async function toWav24k(blob, maxSec) {
+  const ctx = ensureAudioCtx();
+  if (!ctx) throw new Error('このブラウザでは音声を扱えません');
+  let decoded;
+  try {
+    decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+  } catch (_) {
+    throw new Error('この音声ファイルは読み込めませんでした（mp3・m4a・wav などをお試しください）');
+  }
+  const sec = Math.min(decoded.duration, maxSec);
+  const rate = 24000;
+  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(sec * rate)), rate);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start(0);
+  const out = (await off.startRendering()).getChannelData(0);
+
+  // WAV（PCM16）に書き出し
+  const buf = new ArrayBuffer(44 + out.length * 2);
+  const v = new DataView(buf);
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + out.length * 2, true); w(8, 'WAVE');
+  w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, out.length * 2, true);
+  for (let i = 0; i < out.length; i++) {
+    const x = Math.max(-1, Math.min(1, out[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return { data: btoa(bin), sec: out.length / rate };
+}
+
+/** マイク録音（ボタンをもう一度押すと停止。maxSec で自動停止） */
+async function toggleRecording(btn, maxSec, onDone) {
+  if (maker.rec) { maker.rec.stop(); return; }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    return setMsg($('#settingsMsg'), 'このブラウザでは録音できません。ファイルを選んでください', 'error');
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (_) {
+    return setMsg($('#settingsMsg'), 'マイクが使えません。ブラウザのマイクの許可を確認してください', 'error');
+  }
+  const chunks = [];
+  const mr = new MediaRecorder(stream);
+  const label = btn.textContent;
+  let secs = 0;
+  const timer = setInterval(() => {
+    secs++;
+    btn.textContent = `■ 止める（${secs}秒）`;
+    if (secs >= maxSec) mr.stop();
+  }, 1000);
+  mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstop = async () => {
+    clearInterval(timer);
+    stream.getTracks().forEach(t => t.stop());
+    maker.rec = null;
+    btn.textContent = label;
+    btn.classList.remove('recording');
+    try {
+      onDone(await toWav24k(new Blob(chunks, { type: mr.mimeType || 'audio/webm' }), maxSec));
+    } catch (err) {
+      setMsg($('#settingsMsg'), err.message, 'error');
+    }
+  };
+  maker.rec = mr;
+  stopSpeaking();
+  btn.classList.add('recording');
+  btn.textContent = '■ 止める（0秒）';
+  setMsg($('#settingsMsg'), '');
+  mr.start();
+}
+
+async function playWav(item) {
+  if (!item) return;
+  ensureAudioCtx();
+  const buf = await prepareAudio({ data: item.data });
+  if (buf) await playBuffer(buf, previewAvatar);
+}
+
+function bindMaker() {
+  $$('#makerModeSeg button').forEach(b => b.addEventListener('click', () => {
+    maker.mode = b.dataset.mode;
+    renderMaker();
+  }));
+  $('#recSampleBtn').addEventListener('click', e => toggleRecording(e.currentTarget, 30, r => { maker.sample = r; renderMaker(); }));
+  $('#recConsentBtn').addEventListener('click', e => toggleRecording(e.currentTarget, 20, r => { maker.consent = r; renderMaker(); }));
+  $('#sampleFile').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > 30 * 1024 * 1024) return setMsg($('#settingsMsg'), 'ファイルが大きすぎます', 'error');
+    try {
+      maker.sample = await toWav24k(f, 30);
+      setMsg($('#settingsMsg'), '');
+      renderMaker();
+    } catch (err) { setMsg($('#settingsMsg'), err.message, 'error'); }
+  });
+  $('#playSampleBtn').addEventListener('click', () => playWav(maker.sample));
+  $('#playConsentBtn').addEventListener('click', () => playWav(maker.consent));
+
+  $('#makeVoiceBtn').addEventListener('click', () => {
+    const msg = $('#settingsMsg');
+    const isRep = maker.mode === 'replica';
+    if (!maker.sample) return setMsg(msg, '声のサンプルを録音するか、ファイルを選んでください', 'error');
+    if (isRep && maker.sample.sec < 10) return setMsg(msg, '本人の声の再現には、10秒以上のサンプルが必要です', 'error');
+    if (!isRep && maker.sample.sec < 3) return setMsg(msg, '3秒以上のサンプルが必要です', 'error');
+    if (isRep && !maker.consent) return setMsg(msg, '同意の文を録音してください', 'error');
+    if (isRep && !$('#consentAgree').checked) return setMsg(msg, '本人の同意の確認にチェックを入れてください', 'error');
+    const label = $('#makerLabel').value.trim();
+    ensureAudioCtx();
+
+    withBusy($('#makeVoiceBtn'), async () => {
+      setMsg(msg, isRep ? '本人の声を再現しています…（30秒ほどかかることがあります）' : '声の特徴を聞き取って、似た声を作っています…');
+      const r = isRep
+        ? await api('createReplicaVoice', { sample: maker.sample.data, consent: maker.consent.data, agree: true, label })
+        : await api('createSimilarVoice', { sample: maker.sample.data, label });
+      state.user = r.user;
+      setDraftVoice({ gVoice: r.voice.id });
+      draft.engine = 'gemini';
+      maker.sample = null;
+      maker.consent = null;
+      $('#makerLabel').value = '';
+      $('#consentAgree').checked = false;
+      $('#voiceMaker').open = false;
+      renderVoicePanel();
+      setMsg(msg, `「${r.voice.label}」を作りました${r.voice.summary ? '（' + r.voice.summary + '）' : ''}。「保存する」でこのキャラクターの声になります。`, 'ok');
+      // 試し聞き
+      let buf = r.sampleAudio ? await prepareAudio(r.sampleAudio) : null;
+      if (!buf) {
+        try {
+          const t = await api('tts', Object.assign({ text: 'こんにちは。この声でお話しするね。', emotion: 'joy' },
+            geminiTtsOpts(draft.voices, draft.preset, draft.category)));
+          buf = await prepareAudio(t.audio);
+        } catch (_) { /* 試し聞きできなくても作成は完了 */ }
+      }
+      if (buf) await playBuffer(buf, previewAvatar);
+    }, msg);
+  });
+
+  $('#deleteVoiceBtn').addEventListener('click', () => {
+    const id = $('#gVoiceSelect').value;
+    const v = ((state.user && state.user.customVoices) || []).find(x => x.id === id);
+    if (!v) return;
+    if (!confirm(`作った声「${v.label}」を削除します。よろしいですか？`)) return;
+    withBusy($('#deleteVoiceBtn'), async () => {
+      const r = await api('deleteVoice', { id });
+      state.user = r.user;
+      Object.keys(draft.voices).forEach(k => { if (draft.voices[k].gVoice === id) draft.voices[k].gVoice = ''; });
+      Object.keys(prefs.voices).forEach(k => { if (prefs.voices[k].gVoice === id) prefs.voices[k].gVoice = ''; });
+      savePrefs();
+      renderVoicePanel();
+      setMsg($('#settingsMsg'), `「${v.label}」を削除しました`, 'ok');
+    }, $('#settingsMsg'));
+  });
 }
 
 // ---- 表示と会話パネル ----
@@ -1678,11 +1878,12 @@ function bindSettings() {
     }
     renderVoicePanel();
   });
-  $$('#engineSeg button').forEach(b => b.addEventListener('click', () => {
-    draft.engine = b.dataset.engine;
+  $('#optGemini').addEventListener('change', e => {
+    draft.engine = e.target.checked ? 'gemini' : 'device';
     renderVoicePanel();
-  }));
-  $('#gVoiceSelect').addEventListener('change', e => setDraftVoice({ gVoice: e.target.value }));
+  });
+  $('#gVoiceSelect').addEventListener('change', e => { setDraftVoice({ gVoice: e.target.value }); renderVoicePanel(); });
+  bindMaker();
   $$('#gSpeedSeg button').forEach(b => b.addEventListener('click', () => {
     setDraftVoice({ gSpeed: b.dataset.speed });
     renderVoicePanel();

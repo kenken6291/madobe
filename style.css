@@ -572,6 +572,17 @@ input[type="range"]:disabled { opacity: .45; }
 .seg button[aria-checked="true"] { color: var(--ink); }
 .device-voice { border-top: 1px dashed var(--line); padding-top: 14px; margin-top: 6px; }
 .device-title { font-weight: 700; margin: 0 0 10px; }
+.gemini-switch { margin-bottom: 12px; border-bottom: 0; }
+.voice-maker { border: 1px solid var(--line); border-radius: var(--radius-m); padding: 12px 14px; margin: 8px 0 16px; }
+.voice-maker summary { font-weight: 700; cursor: pointer; min-height: 32px; }
+.voice-maker[open] summary { margin-bottom: 12px; }
+.maker-step { margin: 12px 0; }
+.maker-label { font-weight: 700; font-size: .92rem; margin: 0 0 6px; }
+.maker-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.maker-status { font-size: .88rem; color: var(--muted); margin: 6px 0 0; min-height: 1.4em; }
+.maker-status.ok { color: var(--ok); }
+.btn.recording { background: var(--danger); border-color: var(--danger); color: #fff; animation: pulse 1.2s infinite; }
+.consent-phrase { background: var(--sky); border-radius: var(--radius-s); padding: 10px 12px; margin: 0 0 8px; font-weight: 700; line-height: 1.7; }
 output { color: var(--ink); font-weight: 700; }
 
 /* 表示と会話 */
