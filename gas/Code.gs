@@ -10,11 +10,12 @@
  *   PASSWORD_PEPPER  : 任意の長いランダム文字列（パスワードハッシュ用）
  * スクリプトプロパティ（任意）
  *   GEMINI_MODEL     : 既定 gemini-2.5-flash
- *   APP_URL          : メール本文に載せるアプリURL
+ *   APP_URL          : メール本文に載せるアプリURL（未設定なら DEFAULT_APP_URL）
  *   SPREADSHEET_ID   : スタンドアロンGASの場合のみ
  */
 
 const APP_NAME = 'まどべ';
+const DEFAULT_APP_URL = 'https://kenken6291.github.io/madobe/';
 const SHEET_USERS = 'Users';
 const SHEET_HISTORY = 'History';
 
@@ -22,7 +23,8 @@ const USER_HEADERS = [
   'userId', 'email', 'name', 'passwordHash', 'salt', 'isFirstLogin',
   'companionName', 'avatarCategory', 'avatarPreset',
   'avatarImageUrl', 'avatarImageId', 'avatarConfig',
-  'failedCount', 'lockedUntil', 'createdAt', 'lastLoginAt'
+  'failedCount', 'lockedUntil', 'createdAt', 'lastLoginAt',
+  'avatarImages'
 ];
 const HISTORY_HEADERS = ['timestamp', 'userId', 'role', 'text', 'emotion'];
 
@@ -33,6 +35,8 @@ const HISTORY_CONTEXT = 20;         // Geminiに渡す直近の会話数
 const HISTORY_SCAN_ROWS = 3000;     // 履歴検索で遡る最大行数
 const HASH_ROUNDS = 300;
 const EMOTIONS = ['joy', 'neutral', 'sad', 'surprised'];
+// 写真の種類：4表情 ＋ 普通の顔の「瞬き」「しゃべり」
+const IMAGE_KEYS = ['neutral', 'joy', 'sad', 'surprised', 'blink', 'talk'];
 const CATEGORIES = ['pet', 'person', 'anime'];
 const PRESETS = ['dog', 'cat', 'person_f', 'person_m', 'anime_g', 'anime_b', 'custom'];
 
@@ -103,10 +107,24 @@ function getSS_() {
   return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
 }
 
+let usersHeaderChecked_ = false;
+
 function sheet_(name) {
   const s = getSS_().getSheetByName(name);
   if (!s) throw new Error('シート「' + name + '」がありません。setup() を実行してください');
+  if (name === SHEET_USERS && !usersHeaderChecked_) ensureUserHeaders_(s);
   return s;
+}
+
+/** 後から増えた列（avatarImages など）を Users シートに自動追加 */
+function ensureUserHeaders_(s) {
+  usersHeaderChecked_ = true;
+  const lastCol = s.getLastColumn();
+  const cur = lastCol ? s.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  const missing = USER_HEADERS.filter(function (h) { return cur.indexOf(h) < 0; });
+  if (missing.length) {
+    s.getRange(1, cur.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+  }
 }
 
 /** 数式インジェクション対策 */
@@ -187,13 +205,43 @@ function sanitizeConfig_(c) {
       y: isFinite(y) ? Math.min(100, Math.max(0, y)) : dy
     };
   }
-  return {
+  function color(v) { return /^#[0-9a-fA-F]{6}$/.test(v) ? v : '#d9a88a'; }
+  const out = {
     eyeL: pt(c.eyeL, 38, 42),
     eyeR: pt(c.eyeR, 62, 42),
     mouth: pt(c.mouth, 50, 68),
-    lidColor: /^#[0-9a-fA-F]{6}$/.test(c.lidColor) ? c.lidColor : '#d9a88a',
-    brows: !!c.brows
+    lidColor: color(c.lidColor),
+    brows: !!c.brows,
+    perEmotion: { joy: null, sad: null, surprised: null }
   };
+  // 表情ごとの写真で、目・口の位置を個別に指定した場合
+  const pe = c.perEmotion || {};
+  ['joy', 'sad', 'surprised'].forEach(function (e) {
+    if (pe[e] && typeof pe[e] === 'object') {
+      out.perEmotion[e] = {
+        eyeL: pt(pe[e].eyeL, out.eyeL.x, out.eyeL.y),
+        eyeR: pt(pe[e].eyeR, out.eyeR.x, out.eyeR.y),
+        mouth: pt(pe[e].mouth, out.mouth.x, out.mouth.y),
+        lidColor: color(pe[e].lidColor || out.lidColor)
+      };
+    }
+  });
+  return out;
+}
+
+/** avatarImages 列: {neutral:{url,id}, joy, sad, surprised, blink, talk} */
+function parseImages_(v, user) {
+  let o = {};
+  try { o = JSON.parse(v || '{}') || {}; } catch (e) { o = {}; }
+  const out = {};
+  IMAGE_KEYS.forEach(function (e) {
+    const x = o[e] || {};
+    out[e] = { url: String(x.url || ''), id: String(x.id || '') };
+  });
+  if (!out.neutral.url && user && user.avatarImageUrl) {
+    out.neutral = { url: String(user.avatarImageUrl), id: String(user.avatarImageId || '') };
+  }
+  return out;
 }
 
 function publicUser_(u) {
@@ -205,6 +253,12 @@ function publicUser_(u) {
     avatarCategory: String(u.avatarCategory || 'pet'),
     avatarPreset: String(u.avatarPreset || 'dog'),
     avatarImageUrl: String(u.avatarImageUrl || ''),
+    avatarImages: (function () {
+      const imgs = parseImages_(u.avatarImages, u);
+      const o = {};
+      IMAGE_KEYS.forEach(function (e) { o[e] = imgs[e].url; });
+      return o;
+    })(),
     avatarConfig: parseConfig_(u.avatarConfig)
   };
 }
@@ -237,7 +291,7 @@ function auth_(req, allowFirstLogin) {
 // ---- メール ----
 
 function sendTempPasswordMail_(email, name, temp, isReset) {
-  const appUrl = props_().getProperty('APP_URL') || '';
+  const appUrl = props_().getProperty('APP_URL') || DEFAULT_APP_URL;
   const subject = isReset
     ? '【' + APP_NAME + '】仮パスワードを再発行しました'
     : '【' + APP_NAME + '】ご登録ありがとうございます';
@@ -285,7 +339,10 @@ function register_(req) {
       lastLoginAt: ''
     };
     sendTempPasswordMail_(email, name, temp, false); // 送信成功後に登録
-    sheet_(SHEET_USERS).appendRow(USER_HEADERS.map(function (h) { return user[h]; }));
+    user.avatarImages = '{}';
+    const us = sheet_(SHEET_USERS);
+    const headers = us.getRange(1, 1, 1, us.getLastColumn()).getValues()[0];
+    us.appendRow(headers.map(function (h) { return user[h] == null ? '' : user[h]; }));
     return { message: '仮パスワードをメールで送りました。メールを確認してログインしてください' };
   } finally {
     lock.releaseLock();
@@ -369,29 +426,54 @@ function saveAvatar_(req) {
     avatarConfig: JSON.stringify(sanitizeConfig_(req.avatarConfig))
   };
 
-  if (req.imageBase64) {
-    const m = String(req.imageBase64).match(/^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/);
-    if (!m) throw new Error('画像の形式に対応していません（JPEG / PNG / WebP）');
-    const bytes = Utilities.base64Decode(m[3]);
-    if (bytes.length > 3 * 1024 * 1024) throw new Error('画像が大きすぎます（3MBまで）');
-    const folderId = props_().getProperty('DRIVE_FOLDER_ID');
-    if (!folderId) throw new Error('DRIVE_FOLDER_ID が未設定です');
-    const ext = m[2] === 'jpeg' ? 'jpg' : m[2];
-    const blob = Utilities.newBlob(bytes, m[1], 'avatar_' + user.userId + '_' + Date.now() + '.' + ext);
-    const file = DriveApp.getFolderById(folderId).createFile(blob);
-    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    if (user.avatarImageId) {
-      try { DriveApp.getFileById(String(user.avatarImageId)).setTrashed(true); } catch (e) { /* 無視 */ }
-    }
-    fields.avatarImageId = file.getId();
-    fields.avatarImageUrl = 'https://lh3.googleusercontent.com/d/' + file.getId();
-  }
-  if (preset === 'custom' && !fields.avatarImageUrl && !user.avatarImageUrl) {
-    throw new Error('写真を選んでください');
+  const imgs = parseImages_(user.avatarImages, user);
+  const incoming = Object.assign({}, req.images || {});
+  if (req.imageBase64 && !incoming.neutral) incoming.neutral = req.imageBase64; // 旧形式
+
+  let changed = false;
+  IMAGE_KEYS.forEach(function (e) {
+    if (!incoming[e]) return;
+    const saved = saveImage_(user, e, incoming[e]);
+    trashFile_(imgs[e].id);
+    imgs[e] = saved;
+    changed = true;
+  });
+  (Array.isArray(req.removeImages) ? req.removeImages : []).forEach(function (e) {
+    if (e === 'neutral' || IMAGE_KEYS.indexOf(e) < 0 || !imgs[e].url) return;
+    trashFile_(imgs[e].id);
+    imgs[e] = { url: '', id: '' };
+    changed = true;
+  });
+
+  if (preset === 'custom' && !imgs.neutral.url) throw new Error('「普通の顔」の写真を選んでください');
+
+  if (changed || !user.avatarImages) {
+    fields.avatarImages = JSON.stringify(imgs);
+    fields.avatarImageUrl = imgs.neutral.url;
+    fields.avatarImageId = imgs.neutral.id;
   }
 
   updateUser_(user, fields);
   return { user: publicUser_(user) };
+}
+
+function saveImage_(user, emo, dataUrl) {
+  const m = String(dataUrl).match(/^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) throw new Error('画像の形式に対応していません（JPEG / PNG / WebP）');
+  const bytes = Utilities.base64Decode(m[3]);
+  if (bytes.length > 3 * 1024 * 1024) throw new Error('画像が大きすぎます（1枚3MBまで）');
+  const folderId = props_().getProperty('DRIVE_FOLDER_ID');
+  if (!folderId) throw new Error('DRIVE_FOLDER_ID が未設定です');
+  const ext = m[2] === 'jpeg' ? 'jpg' : m[2];
+  const blob = Utilities.newBlob(bytes, m[1], 'avatar_' + user.userId + '_' + emo + '_' + Date.now() + '.' + ext);
+  const file = DriveApp.getFolderById(folderId).createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return { url: 'https://lh3.googleusercontent.com/d/' + file.getId(), id: file.getId() };
+}
+
+function trashFile_(id) {
+  if (!id) return;
+  try { DriveApp.getFileById(String(id)).setTrashed(true); } catch (e) { /* 無視 */ }
 }
 
 // ================= 会話 =================

@@ -1,16 +1,26 @@
 /* =========================================================
    まどべ — script.js
+   ※ GASのURLは config.js に書きます
    ========================================================= */
 'use strict';
 
-// ====== 設定：GASのウェブアプリURLに置き換えてください ======
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbwjYc4KFNTjEqkgi6Vxjhn3WFtmOBQ3kuEniJMDgWhNa87wwABx7r_afPS7D7MZuX6Hfw/exec';
-
+const GAS_URL = String(window.GAS_URL || '');
 const TOKEN_KEY = 'madobe_token';
-const TTS_KEY = 'madobe_tts';
+const PREFS_KEY = 'madobe_prefs';
 const EMOTIONS = ['joy', 'neutral', 'sad', 'surprised'];
 const CALIB_KEYS = ['eyeL', 'eyeR', 'mouth'];
 const CALIB_LABELS = ['画面の左側にある目', '画面の右側にある目', '口のまんなか'];
+const PHOTO_EMOS = ['neutral', 'joy', 'sad', 'surprised'];
+const PHOTO_SUBS = ['blink', 'talk'];                 // 普通の顔の「瞬き」「しゃべり」
+const PHOTO_SLOTS = [...PHOTO_EMOS, ...PHOTO_SUBS];
+const EMO_LABELS = {
+  neutral: '普通の顔', joy: '笑顔', sad: '困り顔', surprised: '驚き顔',
+  blink: '瞬き', talk: 'しゃべり'
+};
+const SLOT_HINTS = {
+  blink: '普通の顔で「目を閉じた」写真です。まばたきのときに一瞬だけ切り替わります。',
+  talk: '普通の顔で「口を開けた」写真です。しゃべっている間、普通の顔と交互に切り替わります。'
+};
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -22,11 +32,34 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch (_) { /* 無視 */ } }
 };
 
+// ---- 端末ごとの設定（声・表示・聞き取り） ----
+const DEFAULT_PREFS = {
+  tts: true,           // 返事を声で読み上げる
+  handsFree: false,    // マイクを押さずに話せる（聞き取りモード）
+  micAutoSend: true,   // 話し終わったら自動で送る
+  stageMode: false,    // キャラクター全画面
+  showCaption: true,   // 全画面時の字幕
+  hideInput: false,    // 全画面時に入力欄を隠す
+  browserFs: true,     // ブラウザも全画面に
+  voices: {}           // キャラクターごとの声 { preset: {voiceURI, rate, pitch} }
+};
+
+function loadPrefs() {
+  let p = {};
+  try { p = JSON.parse(store.get(PREFS_KEY) || '{}') || {}; } catch (_) { p = {}; }
+  const merged = Object.assign({}, DEFAULT_PREFS, p);
+  merged.voices = Object.assign({}, p.voices || {});
+  return merged;
+}
+const prefs = loadPrefs();
+function savePrefs() { store.set(PREFS_KEY, JSON.stringify(prefs)); }
+
 const state = {
   token: store.get(TOKEN_KEY) || '',
   user: null,
   sending: false,
-  tts: store.get(TTS_KEY) === '1',
+  speaking: false,
+  skipTyping: false,
   forcedPw: false
 };
 
@@ -138,6 +171,8 @@ const PRESETS = {
   }
 };
 
+function presetLabel(key) { return key === 'custom' ? '写真' : (PRESETS[key] ? PRESETS[key].label : ''); }
+
 function eyeInner(kind, color) {
   switch (kind) {
     case 'dot':
@@ -204,34 +239,78 @@ function presetSVG(key) {
 // =========================================================
 
 function defaultConfig() {
-  return { eyeL: { x: 38, y: 42 }, eyeR: { x: 62, y: 42 }, mouth: { x: 50, y: 68 }, lidColor: '#d9a88a', brows: false };
+  return {
+    eyeL: { x: 38, y: 42 }, eyeR: { x: 62, y: 42 }, mouth: { x: 50, y: 68 },
+    lidColor: '#d9a88a', brows: false,
+    perEmotion: { joy: null, sad: null, surprised: null }
+  };
+}
+
+function normalizeConfig(cfg) {
+  const c = Object.assign(defaultConfig(), JSON.parse(JSON.stringify(cfg || {})));
+  c.perEmotion = Object.assign({ joy: null, sad: null, surprised: null }, c.perEmotion || {});
+  return c;
+}
+
+/** 表情ごとの目・口の位置（個別指定がなければ普通の顔と同じ） */
+function slotConfigOf(cfg, emo) {
+  const base = normalizeConfig(cfg);
+  if (emo === 'neutral') return base;
+  const pe = base.perEmotion[emo];
+  return Object.assign({}, base, pe || {}, { brows: false });
 }
 
 function escAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function photoAvatarHTML(url, cfg) {
-  const c = Object.assign(defaultConfig(), cfg || {});
+function photoLayerHTML(url, c, emo, opts = {}) {
+  const { lids = true, mouth = true, cls = 'main' } = opts;
   const d = Math.max(8, Math.hypot(c.eyeR.x - c.eyeL.x, c.eyeR.y - c.eyeL.y));
   const er = d * 0.26;
   // 上端を基準に scaleY で下ろす（1=閉じる / .38=笑顔の細め目）
   const lid = e => `<ellipse class="lid" cx="${e.x}" cy="${e.y}" rx="${er * 1.25}" ry="${er * 1.05}" fill="${escAttr(c.lidColor)}"/>`;
-  const brow = (e, cls) => c.brows ? `
+  const brow = (e, bcls) => c.brows ? `
     <g transform="translate(${e.x} ${e.y - er * 1.9})">
-      <path class="brow ${cls}" d="M${-er * 1.1},${er * .2} Q0,${-er * .45} ${er * 1.1},${er * .2}"
+      <path class="brow ${bcls}" d="M${-er * 1.1},${er * .2} Q0,${-er * .45} ${er * 1.1},${er * .2}"
             stroke="#2e2320" stroke-width="${er * .32}" fill="none" stroke-linecap="round" opacity=".75"/>
     </g>` : '';
-  return `<div class="avatar-inner photo-wrap">
-      <img class="photo" src="${escAttr(url)}" alt="話し相手の写真" referrerpolicy="no-referrer" draggable="false">
-      <svg class="overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-        ${lid(c.eyeL)}${lid(c.eyeR)}
-        ${brow(c.eyeL, 'brow-l')}${brow(c.eyeR, 'brow-r')}
+  const mouthSvg = mouth ? `
         <g transform="translate(${c.mouth.x} ${c.mouth.y})">
           <ellipse class="m-talk" rx="${d * .3}" ry="${d * .2}" fill="#3a1d1d"/>
-        </g>
-      </svg>
+        </g>` : '';
+  const overlay = (lids || mouth) ? `
+      <svg class="overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        ${lids ? lid(c.eyeL) + lid(c.eyeR) : ''}
+        ${brow(c.eyeL, 'brow-l')}${brow(c.eyeR, 'brow-r')}
+        ${mouthSvg}
+      </svg>` : '';
+  return `<div class="photo-layer ${cls}" data-emo="${emo}">
+      <img class="photo" src="${escAttr(url)}" alt="" referrerpolicy="no-referrer" draggable="false">${overlay}
     </div>`;
+}
+
+/**
+ * images: { neutral, joy, sad, surprised, blink, talk }（URL。ないものは空）
+ * 4表情はフェードで切り替え、瞬き・しゃべりは普通の顔の上に瞬時に重ねる
+ */
+function photoAvatarHTML(images, cfg) {
+  const main = PHOTO_EMOS
+    .filter(e => images && images[e])
+    .map(e => photoLayerHTML(images[e], slotConfigOf(cfg, e), e))
+    .join('');
+  const n = slotConfigOf(cfg, 'neutral');
+  const talk = images && images.talk
+    ? photoLayerHTML(images.talk, Object.assign({}, n, { brows: false }), 'talk', { mouth: false, cls: 'sub' }) : '';
+  const blink = images && images.blink
+    ? photoLayerHTML(images.blink, n, 'blink', { lids: false, mouth: false, cls: 'sub' }) : '';
+  return `<div class="avatar-inner photo-wrap" role="img" aria-label="話し相手の写真">${main}${talk}${blink}</div>`;
+}
+
+function userImages(u) {
+  const o = Object.assign({}, u.avatarImages || {});
+  if (!o.neutral && u.avatarImageUrl) o.neutral = u.avatarImageUrl;
+  return o;
 }
 
 // =========================================================
@@ -249,21 +328,25 @@ class AvatarView {
     this._revertT = null;
   }
 
-  render({ preset, imageUrl, config }) {
+  render({ preset, images, config }) {
     const isPhoto = preset === 'custom';
     this.el.classList.toggle('photo-mode', isPhoto);
+    this._hasTalk = !!(isPhoto && images && images.neutral && images.talk);
+    this._hasBlink = !!(isPhoto && images && images.neutral && images.blink);
+    this.el.classList.toggle('has-talk', this._hasTalk);
+    this.el.classList.toggle('has-blink', this._hasBlink);
+    this.el.classList.remove('talk-open');
     if (isPhoto) {
-      this.el.innerHTML = imageUrl ? photoAvatarHTML(imageUrl, config) : '';
-      const img = $('img.photo', this.el);
-      if (img) {
+      this.el.innerHTML = images && images.neutral ? photoAvatarHTML(images, config) : '';
+      $$('img.photo', this.el).forEach(img => {
         img.addEventListener('error', () => {
-          const m = String(imageUrl).match(/\/d\/([\w-]+)/);
+          const m = String(img.getAttribute('src')).match(/\/d\/([\w-]+)/);
           if (m && !img.dataset.fb) {
             img.dataset.fb = '1';
             img.src = `https://drive.google.com/thumbnail?id=${m[1]}&sz=w800`;
           }
         });
-      }
+      });
     } else {
       this.el.innerHTML = `<div class="avatar-inner">${presetSVG(PRESETS[preset] ? preset : 'dog')}</div>`;
     }
@@ -271,13 +354,29 @@ class AvatarView {
     this.startBlink();
   }
 
+  /** 写真モード：その表情の写真があれば切り替え、なければ普通の顔で代用 */
+  updatePhotoLayer(e) {
+    const layers = $$('.photo-layer.main', this.el);
+    if (!layers.length) return;
+    const target = layers.some(l => l.dataset.emo === e) ? e : 'neutral';
+    layers.forEach(l => {
+      const on = l.dataset.emo === target;
+      l.classList.toggle('show', on);
+      l.classList.toggle('fallback', on && target !== e);
+    });
+    // 普通の顔（代用を含む）を表示中だけ、瞬き・しゃべり写真を使う
+    this.el.classList.toggle('base-neutral', target === 'neutral');
+    $$('.photo-layer.sub', this.el).forEach(l => l.classList.toggle('fallback', target !== e));
+  }
+
   setEmotion(e, silent = false) {
     if (!EMOTIONS.includes(e)) e = 'neutral';
     clearTimeout(this._revertT);
     this.el.classList.remove('emo-joy', 'emo-neutral', 'emo-sad', 'emo-surprised');
-    void this.el.offsetWidth; // アニメーションを再生し直す
+    void this.el.offsetWidth;
     this.el.classList.add('emo-' + e);
     this.emotion = e;
+    this.updatePhotoLayer(e);
     if (this.stage) this.stage.dataset.emo = e;
     const marks = { joy: '✨', sad: '💧', surprised: '❗' };
     if (this.badge && !silent && marks[e]) {
@@ -317,7 +416,11 @@ class AvatarView {
     this.stopTalking();
   }
 
-  setMouth(v) { this.el.style.setProperty('--mouth', Math.max(0.08, Math.min(1, v)).toFixed(2)); }
+  setMouth(v) {
+    this.el.style.setProperty('--mouth', Math.max(0.08, Math.min(1, v)).toFixed(2));
+    // しゃべり写真があれば、口が大きく開くタイミングで切り替える
+    if (this._hasTalk) this.el.classList.toggle('talk-open', v > 0.45 && this.el.classList.contains('talking'));
+  }
 
   startTalking() { this.el.classList.add('talking'); this.setMouth(0.2); }
 
@@ -325,10 +428,11 @@ class AvatarView {
     clearInterval(this._flapT);
     this._flapT = null;
     this.el.classList.remove('talking');
+    this.el.classList.remove('talk-open');
     this.setMouth(0.2);
   }
 
-  /** 音声読み上げ中など、文字と同期しない口パク */
+  /** 音声読み上げ中の口パク */
   startFlap() {
     this.startTalking();
     clearInterval(this._flapT);
@@ -343,7 +447,7 @@ class AvatarView {
     else if (/[おこそとのほもよろごぞどぼぽぉょオコソトノホモヨロゴゾドボポォョ]/.test(ch)) v = 0.8;
     else if (/[えけせてねへめれげぜでべぺぇエケセテネヘメレゲゼデベペェ]/.test(ch)) v = 0.6;
     else if (/[いきしちにひみりぎじぢびぴぃイキシチニヒミリギジヂビピィうくすつぬふむゆるぐずづぶぷぅゅウクスツヌフムユルグズヅブプゥュんンっッ]/.test(ch)) v = 0.35;
-    else v = 0.35 + Math.random() * 0.6; // 漢字・英字など
+    else v = 0.35 + Math.random() * 0.6;
     this.setMouth(v);
   }
 }
@@ -355,8 +459,10 @@ const previewAvatar = new AvatarView($('#previewAvatar'), $('#previewStage'), nu
 // API
 // =========================================================
 
+function gasUrlMissing() { return !GAS_URL || GAS_URL.includes('XXXX'); }
+
 async function api(action, data = {}) {
-  if (GAS_URL.includes('XXXX')) throw new Error('script.js の GAS_URL を設定してください');
+  if (gasUrlMissing()) throw new Error('config.js の GAS_URL を設定してください');
   let json;
   try {
     const res = await fetch(GAS_URL, {
@@ -430,10 +536,229 @@ function resetPwFields(root) {
   });
 }
 
-function openModal(id) { $('#' + id).classList.add('open'); }
-function closeModal(id) { $('#' + id).classList.remove('open'); }
+function openModal(id) { $('#' + id).classList.add('open'); Listener.abort(); }
+function closeModal(id) { $('#' + id).classList.remove('open'); Listener.schedule(600); }
 
 const isFinePointer = () => window.matchMedia('(pointer: fine)').matches;
+
+function defaultStatus() { return prefs.handsFree ? '話しかけてください' : 'そばにいます'; }
+
+function setStatus(t) {
+  $('#statusLabel').textContent = t;
+  const pill = $('#stagePill');
+  pill.textContent = t;
+  pill.classList.toggle('listening', t.startsWith('聞いて'));
+}
+
+// =========================================================
+// 声（読み上げ）
+// =========================================================
+
+const TTS_OK = 'speechSynthesis' in window;
+let VOICES = [];
+const MALE_HINT = /ichiro|keita|otoya|hattori|daichi|naoki|takumi|kenji|shin|男性|male/i;
+
+function refreshVoices() {
+  if (!TTS_OK) return;
+  VOICES = speechSynthesis.getVoices();
+  if ($('#settingsModal').classList.contains('open') && draft.tab === 'voice') renderVoicePanel();
+}
+
+function jaVoices() { return VOICES.filter(v => /^ja/i.test(v.lang)); }
+
+function autoVoice(preset) {
+  const ja = jaVoices();
+  if (!ja.length) return null;
+  const male = preset === 'person_m' || preset === 'anime_b';
+  const pool = ja.filter(v => MALE_HINT.test(v.name) === male);
+  const list = pool.length ? pool : ja;
+  return list.find(v => /natural|online/i.test(v.name)) || list.find(v => /google/i.test(v.name)) || list[0];
+}
+
+function defaultPitch(preset, category) {
+  if (preset === 'person_m' || preset === 'anime_b') return 0.95;
+  if (preset === 'person_f') return 1.1;
+  if (preset === 'anime_g') return 1.3;
+  if (preset === 'dog' || preset === 'cat') return 1.4;
+  if (preset === 'custom') return category === 'pet' ? 1.4 : category === 'anime' ? 1.25 : 1.05;
+  return 1.1;
+}
+
+function voiceSettingFor(voices, preset) {
+  return Object.assign({ voiceURI: '', rate: 1, pitch: null }, voices[preset] || {});
+}
+
+function resolveVoice(voices, preset, category) {
+  const s = voiceSettingFor(voices, preset);
+  const chosen = s.voiceURI ? VOICES.find(v => v.voiceURI === s.voiceURI) : null;
+  return {
+    voice: chosen || autoVoice(preset),
+    rate: Number(s.rate) || 1,
+    pitch: s.pitch == null ? defaultPitch(preset, category) : Number(s.pitch)
+  };
+}
+
+function curPreset() { return state.user ? state.user.avatarPreset : 'dog'; }
+function curCategory() { return state.user ? state.user.avatarCategory : 'pet'; }
+
+function cleanForSpeech(t) {
+  return String(t).replace(/\p{Extended_Pictographic}|\uFE0F|\u200D/gu, '').trim();
+}
+
+let speakToken = 0;
+function speak(text, opts) {
+  return new Promise(resolve => {
+    if (!TTS_OK) return resolve();
+    const my = ++speakToken;
+    const t = cleanForSpeech(text);
+    if (!t) return resolve();
+    const o = opts || { voices: prefs.voices, preset: curPreset(), category: curCategory() };
+    const r = resolveVoice(o.voices, o.preset, o.category);
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    if (r.voice) { u.voice = r.voice; u.lang = r.voice.lang; } else { u.lang = 'ja-JP'; }
+    u.rate = r.rate;
+    u.pitch = r.pitch;
+    let finished = false;
+    const done = () => { if (!finished) { finished = true; clearTimeout(timer); resolve(); } };
+    const timer = setTimeout(done, (t.length * 400) / r.rate + 5000);
+    u.onend = done;
+    u.onerror = done;
+    setTimeout(() => { if (my === speakToken) speechSynthesis.speak(u); else done(); }, 60);
+  });
+}
+
+function stopSpeaking() {
+  speakToken++;
+  if (TTS_OK) speechSynthesis.cancel();
+}
+
+// =========================================================
+// 聞き取り（音声入力・聞き取りモード）
+// =========================================================
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+const Listener = {
+  rec: null,
+  restartT: null,
+  errCount: 0,
+
+  canAuto() {
+    return prefs.handsFree && state.user && !state.user.isFirstLogin &&
+      !state.sending && !state.speaking && !document.hidden &&
+      !$('.modal.open') && !$('#mainScreen').classList.contains('hidden');
+  },
+
+  /** 聞き取りモードのとき、少し待ってから聞き取りを再開 */
+  schedule(ms = 600) {
+    clearTimeout(this.restartT);
+    if (!SR || !prefs.handsFree) return;
+    this.restartT = setTimeout(() => {
+      if (this.canAuto() && !this.rec) this.start();
+    }, ms);
+  },
+
+  start() {
+    if (!SR || this.rec) return;
+    if (state.speaking) { state.skipTyping = true; stopSpeaking(); }
+    clearTimeout(this.restartT);
+    const rec = new SR();
+    this.rec = rec;
+    rec.lang = 'ja-JP';
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+
+    const ta = $('#chatText');
+    const base = ta.value.trim() ? ta.value.trim() + ' ' : '';
+    let finalText = '';
+    let heardAny = false;
+
+    rec.onresult = e => {
+      let fin = '', inter = '';
+      for (let i = 0; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) fin += r[0].transcript; else inter += r[0].transcript;
+      }
+      finalText = fin;
+      const shown = (fin + inter).trim();
+      if (shown && !heardAny) { heardAny = true; $('#captionBot').textContent = ''; }
+      ta.value = base + shown;
+      autoGrow();
+      showHeard(shown);
+      this.errCount = 0;
+    };
+
+    rec.onerror = e => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        prefs.handsFree = false;
+        savePrefs();
+        updateToggles();
+        toast('マイクが使えません。ブラウザのマイクの許可を確認してください');
+      } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+        this.errCount++;
+        if (this.errCount >= 4 && prefs.handsFree) {
+          prefs.handsFree = false;
+          savePrefs();
+          updateToggles();
+          toast('聞き取りがうまくいかないため、聞き取りモードを止めました');
+        }
+      }
+    };
+
+    rec.onend = () => {
+      this.rec = null;
+      updateMicUi();
+      const heard = finalText.trim();
+      if (heard && (prefs.handsFree || prefs.micAutoSend)) {
+        sendMessage((base + heard).trim());
+        return;
+      }
+      if (!state.sending && !state.speaking) setStatus(defaultStatus());
+      this.schedule(400);
+    };
+
+    try {
+      rec.start();
+    } catch (_) {
+      this.rec = null;
+      return;
+    }
+    updateMicUi();
+    setStatus('聞いています…');
+  },
+
+  stop() {
+    clearTimeout(this.restartT);
+    if (this.rec) { try { this.rec.stop(); } catch (_) { /* 無視 */ } }
+  },
+
+  /** 送信せずに即座に止める */
+  abort() {
+    clearTimeout(this.restartT);
+    if (this.rec) {
+      const r = this.rec;
+      this.rec = null;
+      r.onend = null; r.onresult = null; r.onerror = null;
+      try { r.abort(); } catch (_) { /* 無視 */ }
+      updateMicUi();
+      if (!state.sending && !state.speaking && state.user) setStatus(defaultStatus());
+    }
+  }
+};
+
+function updateMicUi() {
+  const on = !!Listener.rec;
+  const mic = $('#micBtn');
+  mic.classList.toggle('rec', on);
+  mic.setAttribute('aria-label', on ? '聞き取りを止める' : '声で入力');
+  $('#handsFreeBtn').classList.toggle('listening', on && prefs.handsFree);
+}
+
+function showHeard(text) {
+  $('#captionYou').textContent = text ? '🗣 ' + text : '';
+}
 
 // =========================================================
 // 画面切り替え
@@ -451,6 +776,8 @@ async function showMain() {
   $('#authScreen').classList.add('hidden');
   $('#mainScreen').classList.remove('hidden');
   applyUser();
+  applyView();
+  setStatus(defaultStatus());
   if (state.user.isFirstLogin) {
     $('#chatLog').innerHTML = '';
     openPwModal(true);
@@ -463,18 +790,60 @@ function applyUser() {
   const u = state.user;
   $('#companionNameLabel').textContent = u.companionName;
   document.title = `${u.companionName} — まどべ`;
-  mainAvatar.render({ preset: u.avatarPreset, imageUrl: u.avatarImageUrl, config: u.avatarConfig });
+  mainAvatar.render({ preset: u.avatarPreset, images: userImages(u), config: u.avatarConfig });
 }
 
 function forceLogout(message) {
+  Listener.abort();
+  stopSpeaking();
   state.token = '';
   state.user = null;
   store.del(TOKEN_KEY);
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
-  closeModal('pwModal');
-  closeModal('settingsModal');
+  $('#pwModal').classList.remove('open');
+  $('#settingsModal').classList.remove('open');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   showAuth();
   if (message) setMsg($('#authMsg'), message, 'error');
+}
+
+// =========================================================
+// 全画面・トグル
+// =========================================================
+
+function applyView() {
+  const app = $('#mainScreen');
+  app.classList.toggle('stage-mode', !!prefs.stageMode);
+  app.classList.toggle('show-caption', !!prefs.showCaption);
+  app.classList.toggle('hide-input', !!prefs.hideInput);
+  updateToggles();
+}
+
+function setStageMode(on, fromUserAction) {
+  prefs.stageMode = on;
+  savePrefs();
+  applyView();
+  if (fromUserAction && prefs.browserFs) {
+    const el = document.documentElement;
+    if (on && !document.fullscreenElement && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    if (!on && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  }
+  scrollChat();
+}
+
+function updateToggles() {
+  const set = (id, on, label) => {
+    const b = $(id);
+    b.setAttribute('aria-pressed', String(!!on));
+    b.title = label;
+    b.setAttribute('aria-label', label);
+  };
+  set('#ttsBtn', prefs.tts, prefs.tts ? '声で返事：オン' : '声で返事：オフ');
+  set('#handsFreeBtn', prefs.handsFree, prefs.handsFree ? '聞き取りモード：オン' : '聞き取りモード：オフ');
+  set('#stageBtn', prefs.stageMode, prefs.stageMode ? '全画面をやめる' : 'キャラクターを全画面にする');
+  $('#ttsBtn').classList.toggle('hidden', !TTS_OK);
+  $('#handsFreeBtn').classList.toggle('hidden', !SR);
+  $('#micBtn').classList.toggle('hidden', !SR);
+  updateMicUi();
 }
 
 // =========================================================
@@ -583,7 +952,6 @@ function bindPwModal() {
     }, msg);
   });
 
-  // 強制モードでは Esc や背景クリックで閉じない
   $('#pwModal').addEventListener('click', e => {
     if (e.target.id === 'pwModal' && !state.forcedPw) closeModal('pwModal');
   });
@@ -619,94 +987,80 @@ function addTyping() {
   return wrap;
 }
 
-function setStatus(t) { $('#statusLabel').textContent = t; }
-
-async function typewriter(bubble, text, lips) {
+async function typewriter(targets, text, lips, rate = 1) {
   if (lips) mainAvatar.startTalking();
+  const base = prefs.tts && TTS_OK ? 150 / rate : 55;
   for (const ch of [...text]) {
-    bubble.textContent += ch;
+    if (state.skipTyping) { targets.forEach(t => { t.textContent = text; }); break; }
+    targets.forEach(t => { t.textContent += ch; });
     if (lips) mainAvatar.mouthFor(ch);
     scrollChat();
-    await sleep(/[。！？!?\n]/.test(ch) ? 230 : /[、,…]/.test(ch) ? 140 : 55);
+    await sleep(/[。！？!?\n]/.test(ch) ? base * 3 : /[、,…]/.test(ch) ? base * 2 : base);
   }
   if (lips) mainAvatar.stopTalking();
-}
-
-function voicePitch() {
-  const p = state.user ? state.user.avatarPreset : '';
-  const cat = state.user ? state.user.avatarCategory : '';
-  if (p === 'person_m' || p === 'anime_b') return 0.9;
-  if (p === 'person_f') return 1.15;
-  if (p === 'anime_g' || cat === 'anime') return 1.35;
-  if (cat === 'pet') return 1.5;
-  return 1.1;
-}
-
-function speak(text) {
-  return new Promise(resolve => {
-    try {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'ja-JP';
-      u.rate = 1.02;
-      u.pitch = voicePitch();
-      const v = speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith('ja'));
-      if (v) u.voice = v;
-      let finished = false;
-      const done = () => { if (!finished) { finished = true; clearTimeout(timer); resolve(); } };
-      const timer = setTimeout(done, text.length * 350 + 4000);
-      u.onend = done;
-      u.onerror = done;
-      speechSynthesis.speak(u);
-    } catch (_) {
-      resolve();
-    }
-  });
+  scrollChat();
 }
 
 async function presentReply(text, emotion) {
+  state.skipTyping = false;
+  state.speaking = true;
   mainAvatar.setEmotion(emotion);
   const bubble = addMessage('model', '');
-  if (state.tts && 'speechSynthesis' in window) {
-    const spoken = speak(text);
-    mainAvatar.startFlap();
-    await typewriter(bubble, text, false);
-    await spoken;
+  const cap = $('#captionBot');
+  cap.textContent = '';
+  setStatus('話しています');
+  try {
+    if (prefs.tts && TTS_OK) {
+      const { rate } = resolveVoice(prefs.voices, curPreset(), curCategory());
+      const spoken = speak(text);
+      mainAvatar.startFlap();
+      await typewriter([bubble, cap], text, false, rate);
+      await spoken;
+    } else {
+      await typewriter([bubble, cap], text, true);
+    }
+  } finally {
     mainAvatar.stopTalking();
-  } else {
-    await typewriter(bubble, text, true);
+    state.speaking = false;
+    state.skipTyping = false;
+    mainAvatar.revertLater();
+    if (!state.sending) setStatus(defaultStatus());
+    Listener.schedule(500);
   }
-  mainAvatar.revertLater();
 }
 
-async function sendMessage() {
+async function sendMessage(textArg) {
   const ta = $('#chatText');
-  const text = ta.value.trim();
+  const text = String(textArg != null ? textArg : ta.value).trim();
   if (!text || state.sending) return;
-  state.sending = true;
-  $('#sendBtn').disabled = true;
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  Listener.abort();
+  stopSpeaking();
   mainAvatar.stopTalking();
 
+  state.sending = true;
+  $('#sendBtn').disabled = true;
   ta.value = '';
   autoGrow();
   addMessage('user', text);
+  showHeard(text);
+  $('#captionBot').textContent = '';
   const typing = addTyping();
   setStatus('考えています…');
 
   try {
     const r = await api('chat', { message: text });
     typing.remove();
-    setStatus('話しています');
     await presentReply(r.reply, r.emotion);
   } catch (err) {
     typing.remove();
     addMessage('system', err.message);
+    $('#captionBot').textContent = err.message;
   } finally {
     state.sending = false;
     $('#sendBtn').disabled = false;
-    setStatus('そばにいます');
-    if (isFinePointer()) ta.focus();
+    setStatus(defaultStatus());
+    if (isFinePointer() && !prefs.handsFree && !prefs.hideInput) ta.focus();
+    Listener.schedule(500);
   }
 }
 
@@ -714,7 +1068,7 @@ function greet() {
   const u = state.user;
   const h = new Date().getHours();
   const hello = h < 5 ? 'こんばんは' : h < 11 ? 'おはよう' : h < 18 ? 'こんにちは' : 'こんばんは';
-  presentReply(`${u.name}さん、${hello}！ ${u.companionName}です。今日はどんな一日でしたか？`, 'joy');
+  return presentReply(`${u.name}さん、${hello}！ ${u.companionName}です。今日はどんな一日でしたか？`, 'joy');
 }
 
 async function loadHistory() {
@@ -728,6 +1082,8 @@ async function loadHistory() {
       r.history.forEach(h => addMessage(h.role === 'model' ? 'model' : 'user', h.text));
       const last = [...r.history].reverse().find(h => h.role === 'model');
       mainAvatar.setEmotion(last ? last.emotion : 'neutral', true);
+      $('#captionBot').textContent = last ? last.text : '';
+      Listener.schedule(800);
     } else {
       greet();
     }
@@ -747,6 +1103,8 @@ function bindChat() {
   $('#chatForm').addEventListener('submit', e => { e.preventDefault(); sendMessage(); });
   const ta = $('#chatText');
   ta.addEventListener('input', autoGrow);
+  ta.addEventListener('focus', () => Listener.abort()); // 文字入力中は聞き取りを止める
+  ta.addEventListener('blur', () => Listener.schedule(1500));
   ta.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && isFinePointer()) {
       e.preventDefault();
@@ -754,29 +1112,20 @@ function bindChat() {
     }
   });
 
-  // 音声入力
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const mic = $('#micBtn');
-  if (!SR) { mic.classList.add('hidden'); return; }
-  let rec = null;
-  mic.addEventListener('click', () => {
-    if (rec) { rec.stop(); return; }
-    rec = new SR();
-    rec.lang = 'ja-JP';
-    rec.interimResults = true;
-    rec.continuous = false;
-    const base = ta.value ? ta.value + ' ' : '';
-    rec.onresult = e => {
-      let t = '';
-      for (const res of e.results) t += res[0].transcript;
-      ta.value = base + t;
-      autoGrow();
-    };
-    rec.onerror = e => { if (e.error !== 'no-speech' && e.error !== 'aborted') toast('音声を聞き取れませんでした'); };
-    rec.onend = () => { rec = null; mic.classList.remove('rec'); mic.setAttribute('aria-label', '声で入力'); };
-    mic.classList.add('rec');
-    mic.setAttribute('aria-label', '音声入力を止める');
-    rec.start();
+  $('#micBtn').addEventListener('click', () => {
+    if (Listener.rec) Listener.stop(); else Listener.start();
+  });
+
+  // 話している途中でキャラクターをタップすると止まる
+  $('#stage').addEventListener('click', () => {
+    if (state.speaking) {
+      state.skipTyping = true;
+      stopSpeaking();
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) Listener.abort(); else Listener.schedule(800);
   });
 }
 
@@ -784,23 +1133,30 @@ function bindChat() {
 // ヘッダー・メニュー
 // =========================================================
 
-function updateTtsBtn() {
-  const b = $('#ttsBtn');
-  b.setAttribute('aria-pressed', String(state.tts));
-  b.setAttribute('aria-label', state.tts ? '声で話す：オン' : '声で話す：オフ');
-  b.title = state.tts ? '声で話す：オン' : '声で話す：オフ';
-}
-
 function bindHeader() {
-  if (!('speechSynthesis' in window)) $('#ttsBtn').classList.add('hidden');
-  updateTtsBtn();
   $('#ttsBtn').addEventListener('click', () => {
-    state.tts = !state.tts;
-    store.set(TTS_KEY, state.tts ? '1' : '0');
-    if (!state.tts && 'speechSynthesis' in window) speechSynthesis.cancel();
-    updateTtsBtn();
-    toast(state.tts ? '声でお返事します' : '文字だけでお返事します');
+    prefs.tts = !prefs.tts;
+    savePrefs();
+    if (!prefs.tts) stopSpeaking();
+    updateToggles();
+    toast(prefs.tts ? '声でお返事します' : '文字だけでお返事します');
   });
+
+  $('#handsFreeBtn').addEventListener('click', () => {
+    prefs.handsFree = !prefs.handsFree;
+    savePrefs();
+    updateToggles();
+    if (prefs.handsFree) {
+      toast('マイクを押さずに話しかけられます');
+      Listener.schedule(150);
+    } else {
+      Listener.abort();
+      toast('聞き取りを止めました');
+    }
+    if (!state.sending && !state.speaking && !Listener.rec) setStatus(defaultStatus());
+  });
+
+  $('#stageBtn').addEventListener('click', () => setStageMode(!prefs.stageMode, true));
 
   const menu = $('#menu');
   const menuBtn = $('#menuBtn');
@@ -821,6 +1177,8 @@ function bindHeader() {
       const r = await api('clearHistory');
       toast(r.message);
       $('#chatLog').innerHTML = '';
+      $('#captionBot').textContent = '';
+      showHeard('');
       greet();
     } catch (err) { toast(err.message); }
   });
@@ -832,7 +1190,7 @@ function bindHeader() {
     setMsg($('#authMsg'), 'ログアウトしました', 'ok');
   });
 
-  $('#settingsBtn').addEventListener('click', openSettings);
+  $('#settingsBtn').addEventListener('click', () => openSettings('char'));
 
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
@@ -843,35 +1201,60 @@ function bindHeader() {
 }
 
 // =========================================================
-// 話し相手の設定
+// 設定（キャラクター／声／表示と会話）
 // =========================================================
 
 const draft = {};
+const VIEW_KEYS = ['tts', 'handsFree', 'micAutoSend', 'stageMode', 'showCaption', 'hideInput', 'browserFs'];
+const VIEW_IDS = {
+  tts: '#optTts', handsFree: '#optHandsFree', micAutoSend: '#optAutoSend',
+  stageMode: '#optStage', showCaption: '#optCaption', hideInput: '#optHideInput', browserFs: '#optBrowserFs'
+};
 
-function openSettings() {
+function openSettings(tab = 'char') {
   const u = state.user;
+  stopSpeaking();
+  const imgs = userImages(u);
+  const photos = {};
+  PHOTO_SLOTS.forEach(e => { photos[e] = { src: imgs[e] || '', data: null, ctx: null, removed: false }; });
   Object.assign(draft, {
+    tab,
     companionName: u.companionName,
     category: u.avatarCategory || 'pet',
     preset: u.avatarPreset || 'dog',
-    imageUrl: u.avatarImageUrl || '',
-    newImage: null,
-    ctx: null,
-    config: JSON.parse(JSON.stringify(u.avatarConfig || defaultConfig())),
-    calibStep: 3
+    photos,
+    slot: 'neutral',
+    steps: { neutral: imgs.neutral ? 3 : 0, joy: 3, sad: 3, surprised: 3, blink: 3, talk: 3 },
+    config: normalizeConfig(u.avatarConfig),
+    voices: JSON.parse(JSON.stringify(prefs.voices || {})),
+    view: VIEW_KEYS.reduce((o, k) => (o[k] = prefs[k], o), {})
   });
   $('#companionName').value = draft.companionName;
   setMsg($('#settingsMsg'), '');
   renderCategory();
   renderPresetGrid();
   renderPhotoSection();
-  renderPreview();
+  renderViewPanel();
+  switchSettingsTab(tab);
   openModal('settingsModal');
+  renderPreview();
 }
 
 function closeSettings() {
-  closeModal('settingsModal');
+  stopSpeaking();
   previewAvatar.stop();
+  closeModal('settingsModal');
+}
+
+function switchSettingsTab(tab) {
+  draft.tab = tab;
+  $$('.stab').forEach(b => {
+    const on = b.dataset.stab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  $$('[data-spanel]').forEach(p => p.classList.toggle('hidden', p.dataset.spanel !== tab));
+  if (tab === 'voice') renderVoicePanel();
 }
 
 function renderCategory() {
@@ -906,42 +1289,103 @@ function selectPreset(key) {
   renderPreview();
 }
 
+function draftImages() {
+  const o = {};
+  PHOTO_SLOTS.forEach(e => { if (draft.photos[e].src) o[e] = draft.photos[e].src; });
+  return o;
+}
+
+/** 今選んでいる表情スロットの目・口設定（普通の顔と同じなら null） */
+function slotCfg(slot) {
+  if (slot === 'neutral') return draft.config;
+  return PHOTO_EMOS.includes(slot) ? draft.config.perEmotion[slot] : null;
+}
+
+function isSubSlot(slot) { return PHOTO_SUBS.includes(slot); }
+
 function renderPreview() {
-  const src = draft.newImage || draft.imageUrl;
-  const empty = draft.preset === 'custom' && !src;
+  const imgs = draftImages();
+  const empty = draft.preset === 'custom' && !imgs.neutral;
   $('#previewEmpty').classList.toggle('hidden', !empty);
   $('#previewAvatar').classList.toggle('hidden', empty);
-  if (!empty) previewAvatar.render({ preset: draft.preset, imageUrl: src, config: draft.config });
+  if (empty) return;
+  previewAvatar.render({ preset: draft.preset, images: imgs, config: draft.config });
+  if (draft.preset === 'custom') previewAvatar.setEmotion(isSubSlot(draft.slot) ? 'neutral' : draft.slot, true);
+}
+
+function renderSlots() {
+  const box = $('#photoSlots');
+  box.innerHTML = '';
+  PHOTO_SLOTS.forEach(e => {
+    const ph = draft.photos[e];
+    const cfg = slotCfg(e);
+    const needTap = ph.src && (e === 'neutral' || cfg) && draft.steps[e] < 3;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'photo-slot' + (draft.slot === e ? ' selected' : '');
+    b.setAttribute('aria-pressed', String(draft.slot === e));
+    b.innerHTML = `<span class="slot-thumb">${ph.src ? `<img src="${escAttr(ph.src)}" alt="" referrerpolicy="no-referrer">` : '＋'}</span>
+      <span>${EMO_LABELS[e]}</span>${needTap ? '<span class="need">位置を指定</span>' : ''}`;
+    b.addEventListener('click', () => {
+      draft.slot = e;
+      renderPhotoSection();
+      if (draft.photos.neutral.src) previewAvatar.setEmotion(isSubSlot(e) ? 'neutral' : e, true);
+    });
+    box.appendChild(b);
+  });
 }
 
 function renderPhotoSection() {
   const on = draft.preset === 'custom';
   $('#photoSection').classList.toggle('hidden', !on);
   if (!on) return;
-  const src = draft.newImage || draft.imageUrl;
-  $('#calibArea').classList.toggle('hidden', !src);
-  if (src) $('#calibImg').src = src;
-  $('#lidColor').value = draft.config.lidColor || '#d9a88a';
+  renderSlots();
+
+  const s = draft.slot;
+  const ph = draft.photos[s];
+  const isN = s === 'neutral';
+  const isSub = isSubSlot(s);
+  $('#slotTitle').textContent = `${EMO_LABELS[s]}の写真` + (isN ? '（必須）' : '（なくても大丈夫です）');
+  $('#slotHint').textContent = isSub
+    ? SLOT_HINTS[s] + '「普通の顔」と同じ位置・大きさで撮ってください（目や口の位置指定はいりません）。'
+    : '顔が真ん中に写った写真がおすすめです（正方形に切り抜きます）。どの表情も同じ位置・同じ大きさで撮ると、自然に切り替わります。';
+  $('#slotRemove').classList.toggle('hidden', isN || !ph.src);
+  $('#calibArea').classList.toggle('hidden', !ph.src || isSub);
+  if (!ph.src || isSub) return;
+
+  const cfg = slotCfg(s);
+  $('#samePosWrap').classList.toggle('hidden', isN);
+  $('#samePos').checked = !isN && !cfg;
+  const needCalib = isN || !!cfg;
+  $('#calibWrap').classList.toggle('hidden', !needCalib);
+  $('#browWrap').classList.toggle('hidden', !isN);
+  if (needCalib) {
+    $('#calibImg').src = ph.src;
+    $('#lidColor').value = cfg.lidColor || '#d9a88a';
+  }
   $('#browToggle').checked = !!draft.config.brows;
   renderMarkers();
 }
 
 function renderMarkers() {
+  const cfg = slotCfg(draft.slot);
+  const step = draft.steps[draft.slot];
   CALIB_KEYS.forEach((k, i) => {
     const m = $(`.marker[data-k="${k}"]`);
-    const visible = i < draft.calibStep;
+    const visible = !!cfg && i < step;
     m.classList.toggle('show', visible);
     if (visible) {
-      m.style.left = draft.config[k].x + '%';
-      m.style.top = draft.config[k].y + '%';
+      m.style.left = cfg[k].x + '%';
+      m.style.top = cfg[k].y + '%';
     }
   });
   const t = $('#calibText');
-  if (draft.calibStep < 3) {
-    t.textContent = `写真の「${CALIB_LABELS[draft.calibStep]}」をタップしてください（${draft.calibStep + 1}/3）`;
+  if (!cfg) { t.textContent = ''; return; }
+  if (step < 3) {
+    t.textContent = `写真の「${CALIB_LABELS[step]}」をタップしてください（${step + 1}/3）`;
     t.classList.remove('done');
   } else {
-    t.textContent = '目と口の位置を設定しました。「表情を試す」で確認できます。';
+    t.textContent = '目と口の位置を設定しました。左の「表情を試す」で確認できます。';
     t.classList.add('done');
   }
 }
@@ -976,19 +1420,81 @@ function sampleColor(ctx, xPct, yPct) {
 }
 
 /** 目の少し上（まぶた付近）の色を拾って、まばたき用の色にする */
-function autoSampleLid() {
-  if (!draft.ctx) return;
-  const c = draft.config;
+function autoSampleLid(slot) {
+  const ctx = draft.photos[slot].ctx;
+  const c = slotCfg(slot);
+  if (!ctx || !c) return;
   const d = Math.hypot(c.eyeR.x - c.eyeL.x, c.eyeR.y - c.eyeL.y);
   const off = d * 0.26 * 1.6;
-  const a = sampleColor(draft.ctx, c.eyeL.x, c.eyeL.y - off);
-  const b = sampleColor(draft.ctx, c.eyeR.x, c.eyeR.y - off);
-  const hex = '#' + [0, 1, 2].map(i => Math.round((a[i] + b[i]) / 2).toString(16).padStart(2, '0')).join('');
-  c.lidColor = hex;
-  $('#lidColor').value = hex;
+  const a = sampleColor(ctx, c.eyeL.x, c.eyeL.y - off);
+  const b = sampleColor(ctx, c.eyeR.x, c.eyeR.y - off);
+  c.lidColor = '#' + [0, 1, 2].map(i => Math.round((a[i] + b[i]) / 2).toString(16).padStart(2, '0')).join('');
+  $('#lidColor').value = c.lidColor;
+}
+
+// ---- 声パネル ----
+
+function renderVoicePanel() {
+  const key = draft.preset;
+  const s = voiceSettingFor(draft.voices, key);
+  const name = $('#companionName').value.trim() || draft.companionName;
+  $('#voiceFor').textContent = `「${name}」（${presetLabel(key)}）の声を設定します。キャラクターごとに覚えます。`;
+
+  const sel = $('#voiceSelect');
+  sel.innerHTML = '';
+  const auto = autoVoice(key);
+  const optAuto = document.createElement('option');
+  optAuto.value = '';
+  optAuto.textContent = 'おまかせ' + (auto ? `（${auto.name}）` : '');
+  sel.appendChild(optAuto);
+  const ja = jaVoices();
+  ja.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v.voiceURI;
+    o.textContent = v.name + (v.localService ? '' : '（オンライン）');
+    sel.appendChild(o);
+  });
+  sel.value = ja.some(v => v.voiceURI === s.voiceURI) ? s.voiceURI : '';
+  $('#voiceNote').classList.toggle('hidden', ja.length > 0 || !TTS_OK);
+
+  $('#voiceRate').value = s.rate;
+  $('#rateOut').textContent = rateLabel(s.rate);
+  const autoPitch = s.pitch == null;
+  const p = autoPitch ? defaultPitch(key, draft.category) : Number(s.pitch);
+  $('#pitchAuto').checked = autoPitch;
+  $('#voicePitch').value = p;
+  $('#voicePitch').disabled = autoPitch;
+  $('#pitchOut').textContent = p.toFixed(2);
+}
+
+function rateLabel(r) {
+  r = Number(r);
+  const word = r < 0.85 ? 'ゆっくり' : r > 1.15 ? 'はやめ' : 'ふつう';
+  return `${word}（${r.toFixed(2)}）`;
+}
+
+function setDraftVoice(patch) {
+  const k = draft.preset;
+  draft.voices[k] = Object.assign(voiceSettingFor(draft.voices, k), patch);
+}
+
+// ---- 表示と会話パネル ----
+
+function renderViewPanel() {
+  VIEW_KEYS.forEach(k => { $(VIEW_IDS[k]).checked = !!draft.view[k]; });
+  const srOff = !SR;
+  ['#optHandsFree', '#optAutoSend'].forEach(id => {
+    $(id).disabled = srOff;
+    $(id).closest('.opt').classList.toggle('disabled', srOff);
+  });
+  $('#optTts').disabled = !TTS_OK;
+  $('#optTts').closest('.opt').classList.toggle('disabled', !TTS_OK);
+  $('#srNote').classList.toggle('hidden', !srOff);
 }
 
 function bindSettings() {
+  $$('.stab').forEach(b => b.addEventListener('click', () => switchSettingsTab(b.dataset.stab)));
+
   $$('#categorySeg button').forEach(b => b.addEventListener('click', () => {
     draft.category = b.dataset.cat;
     if (draft.preset !== 'custom' && PRESETS[draft.preset].category !== draft.category) {
@@ -1005,12 +1511,17 @@ function bindSettings() {
     e.target.value = '';
     if (!f) return;
     if (f.size > 15 * 1024 * 1024) return setMsg($('#settingsMsg'), '写真が大きすぎます（15MBまで）', 'error');
+    const slot = draft.slot;
     try {
       const { dataUrl, ctx } = await loadAndCropImage(f);
-      draft.newImage = dataUrl;
-      draft.ctx = ctx;
-      draft.config = defaultConfig();
-      draft.calibStep = 0;
+      draft.photos[slot] = { src: dataUrl, data: dataUrl, ctx, removed: false };
+      if (slot === 'neutral') {
+        const pe = draft.config.perEmotion;
+        draft.config = Object.assign(defaultConfig(), { brows: draft.config.brows, perEmotion: pe });
+        draft.steps.neutral = 0;
+      } else if (slotCfg(slot)) {
+        draft.steps[slot] = 0;
+      }
       setMsg($('#settingsMsg'), '');
       renderPhotoSection();
       renderPreview();
@@ -1019,31 +1530,69 @@ function bindSettings() {
     }
   });
 
+  $('#slotRemove').addEventListener('click', () => {
+    const slot = draft.slot;
+    if (slot === 'neutral') return;
+    draft.photos[slot] = { src: '', data: null, ctx: null, removed: true };
+    if (PHOTO_EMOS.includes(slot)) draft.config.perEmotion[slot] = null;
+    draft.steps[slot] = 3;
+    renderPhotoSection();
+    renderPreview();
+  });
+
+  $('#samePos').addEventListener('change', e => {
+    const slot = draft.slot;
+    if (slot === 'neutral' || isSubSlot(slot)) return;
+    if (e.target.checked) {
+      draft.config.perEmotion[slot] = null;
+      draft.steps[slot] = 3;
+    } else {
+      const n = draft.config;
+      draft.config.perEmotion[slot] = {
+        eyeL: { ...n.eyeL }, eyeR: { ...n.eyeR }, mouth: { ...n.mouth }, lidColor: n.lidColor
+      };
+      draft.steps[slot] = 0;
+    }
+    renderPhotoSection();
+    renderPreview();
+  });
+
   $('#calibBox').addEventListener('click', e => {
-    if (draft.calibStep >= 3) return;
+    const slot = draft.slot;
+    const cfg = slotCfg(slot);
+    if (!cfg || draft.steps[slot] >= 3) return;
     const r = e.currentTarget.getBoundingClientRect();
     const x = Math.round(((e.clientX - r.left) / r.width) * 1000) / 10;
     const y = Math.round(((e.clientY - r.top) / r.height) * 1000) / 10;
-    draft.config[CALIB_KEYS[draft.calibStep]] = { x, y };
-    draft.calibStep++;
-    if (draft.calibStep === 3) {
-      autoSampleLid();
+    cfg[CALIB_KEYS[draft.steps[slot]]] = { x, y };
+    draft.steps[slot]++;
+    if (draft.steps[slot] === 3) {
+      autoSampleLid(slot);
+      renderSlots();
       renderPreview();
     }
     renderMarkers();
   });
 
   $('#calibReset').addEventListener('click', () => {
-    draft.calibStep = 0;
+    draft.steps[draft.slot] = 0;
+    renderSlots();
     renderMarkers();
   });
-
-  $('#lidColor').addEventListener('input', e => { draft.config.lidColor = e.target.value; renderPreview(); });
+  $('#lidColor').addEventListener('input', e => {
+    const cfg = slotCfg(draft.slot);
+    if (cfg) cfg.lidColor = e.target.value;
+    renderPreview();
+  });
   $('#browToggle').addEventListener('change', e => { draft.config.brows = e.target.checked; renderPreview(); });
 
   $$('.emo-test button').forEach(b => b.addEventListener('click', async () => {
     const emo = b.dataset.emo;
-    if (emo === 'talk') {
+    if (emo === 'blink') {
+      previewAvatar.el.classList.add('blink');
+      await sleep(600);
+      previewAvatar.el.classList.remove('blink');
+    } else if (emo === 'talk') {
       previewAvatar.startFlap();
       await sleep(1600);
       previewAvatar.stopTalking();
@@ -1052,32 +1601,102 @@ function bindSettings() {
     }
   }));
 
+  // 声
+  $('#voiceSelect').addEventListener('change', e => setDraftVoice({ voiceURI: e.target.value }));
+  $('#voiceRate').addEventListener('input', e => {
+    setDraftVoice({ rate: Number(e.target.value) });
+    $('#rateOut').textContent = rateLabel(e.target.value);
+  });
+  $('#voicePitch').addEventListener('input', e => {
+    setDraftVoice({ pitch: Number(e.target.value) });
+    $('#pitchOut').textContent = Number(e.target.value).toFixed(2);
+  });
+  $('#pitchAuto').addEventListener('change', e => {
+    if (e.target.checked) {
+      setDraftVoice({ pitch: null });
+    } else {
+      setDraftVoice({ pitch: Number($('#voicePitch').value) });
+    }
+    renderVoicePanel();
+  });
+  $('#voiceTest').addEventListener('click', async () => {
+    if (!TTS_OK) return setMsg($('#settingsMsg'), 'このブラウザは読み上げに対応していません', 'error');
+    const name = $('#companionName').value.trim() || draft.companionName;
+    previewAvatar.startFlap();
+    await speak(`こんにちは、${name}です。今日もいっしょにお話ししようね。`,
+      { voices: draft.voices, preset: draft.preset, category: draft.category });
+    previewAvatar.stopTalking();
+  });
+
+  // 表示と会話
+  VIEW_KEYS.forEach(k => $(VIEW_IDS[k]).addEventListener('change', e => { draft.view[k] = e.target.checked; }));
+
   $('#settingsCancel').addEventListener('click', closeSettings);
   $('#settingsModal').addEventListener('click', e => { if (e.target.id === 'settingsModal') closeSettings(); });
 
   $('#settingsSave').addEventListener('click', () => {
     const msg = $('#settingsMsg');
+    const u = state.user;
     const name = $('#companionName').value.trim();
-    if (!name) return setMsg(msg, '名前を入力してください', 'error');
-    if (draft.preset === 'custom') {
-      if (!draft.newImage && !draft.imageUrl) return setMsg(msg, '写真を選んでください', 'error');
-      if (draft.calibStep < 3) return setMsg(msg, '目と口の位置を最後までタップしてください', 'error');
-    }
-    withBusy($('#settingsSave'), async () => {
-      const payload = {
-        companionName: name,
-        avatarCategory: draft.category,
-        avatarPreset: draft.preset,
-        avatarConfig: draft.config
+    if (!name) { switchSettingsTab('char'); return setMsg(msg, '名前を入力してください', 'error'); }
+
+    const photoChanged = PHOTO_SLOTS.some(e => draft.photos[e].data || draft.photos[e].removed);
+    const avatarChanged =
+      name !== u.companionName || draft.category !== u.avatarCategory || draft.preset !== u.avatarPreset ||
+      photoChanged || JSON.stringify(draft.config) !== JSON.stringify(normalizeConfig(u.avatarConfig));
+
+    if (avatarChanged && draft.preset === 'custom') {
+      const fail = (slot, text) => {
+        switchSettingsTab('char');
+        draft.slot = slot;
+        renderPhotoSection();
+        setMsg(msg, text, 'error');
       };
-      if (draft.preset === 'custom' && draft.newImage) payload.imageBase64 = draft.newImage;
-      const r = await api('saveAvatar', payload);
-      state.user = r.user;
-      applyUser();
+      if (!draft.photos.neutral.src) return fail('neutral', '「普通の顔」の写真を選んでください');
+      const bad = PHOTO_EMOS.find(e => draft.photos[e].src && slotCfg(e) && draft.steps[e] < 3);
+      if (bad) return fail(bad, `「${EMO_LABELS[bad]}」の目と口の位置を最後までタップしてください`);
+    }
+
+    withBusy($('#settingsSave'), async () => {
+      if (avatarChanged) {
+        const payload = {
+          companionName: name,
+          avatarCategory: draft.category,
+          avatarPreset: draft.preset,
+          avatarConfig: draft.config
+        };
+        if (draft.preset === 'custom') {
+          const images = {};
+          PHOTO_SLOTS.forEach(e => { if (draft.photos[e].data) images[e] = draft.photos[e].data; });
+          if (Object.keys(images).length) payload.images = images;
+          const removes = PHOTO_SLOTS.filter(e => draft.photos[e].removed);
+          if (removes.length) payload.removeImages = removes;
+          // 写真のない表情の個別設定は送らない
+          PHOTO_EMOS.forEach(e => { if (e !== 'neutral' && !draft.photos[e].src) payload.avatarConfig.perEmotion[e] = null; });
+        }
+        const r = await api('saveAvatar', payload);
+        state.user = r.user;
+        applyUser();
+      }
+
+      const wasStage = prefs.stageMode;
+      prefs.voices = draft.voices;
+      VIEW_KEYS.forEach(k => { prefs[k] = draft.view[k]; });
+      savePrefs();
+      if (!prefs.tts) stopSpeaking();
+      if (!prefs.handsFree) Listener.abort();
+
       closeSettings();
-      mainAvatar.setEmotion('joy');
-      mainAvatar.revertLater(4000);
-      toast(`${r.user.companionName}がそばにいます`);
+      if (prefs.stageMode !== wasStage) setStageMode(prefs.stageMode, true); else applyView();
+      setStatus(defaultStatus());
+
+      if (avatarChanged) {
+        mainAvatar.setEmotion('joy');
+        mainAvatar.revertLater(4000);
+        toast(`${state.user.companionName}がそばにいます`);
+      } else {
+        toast('設定を保存しました');
+      }
     }, msg);
   });
 }
@@ -1093,7 +1712,11 @@ async function init() {
   bindChat();
   bindHeader();
   bindSettings();
-  if ('speechSynthesis' in window) speechSynthesis.getVoices(); // 声の一覧を先読み
+
+  if (TTS_OK) {
+    refreshVoices();
+    speechSynthesis.addEventListener('voiceschanged', refreshVoices);
+  }
 
   if (state.token) {
     try {
@@ -1107,7 +1730,7 @@ async function init() {
     }
   }
   showAuth();
-  if (GAS_URL.includes('XXXX')) setMsg($('#authMsg'), 'script.js の GAS_URL を設定してください', 'error');
+  if (gasUrlMissing()) setMsg($('#authMsg'), 'config.js の GAS_URL を設定してください', 'error');
 }
 
 document.addEventListener('DOMContentLoaded', init);

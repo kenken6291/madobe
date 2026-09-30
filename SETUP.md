@@ -4,6 +4,7 @@
 madobe/                  ← GitHub リポジトリ（GitHub Pages）
 ├── index.html
 ├── style.css
+├── config.js            ← GASのURLだけを書くファイル
 ├── script.js
 └── gas/Code.gs          ← Apps Script エディタに貼り付け（Pagesには不要）
 ```
@@ -29,11 +30,12 @@ madobe/                  ← GitHub リポジトリ（GitHub Pages）
 | I | avatarPreset | dog / cat / person_f / person_m / anime_g / anime_b / custom |
 | J | avatarImageUrl | 写真の公開URL（lh3.googleusercontent.com） |
 | K | avatarImageId | DriveファイルID（差し替え時に旧画像をゴミ箱へ） |
-| L | avatarConfig | JSON：目・口の位置(%)、まぶた色、眉の有無 |
+| L | avatarConfig | JSON：目・口の位置(%)、まぶた色、眉の有無、表情ごとの個別位置（perEmotion） |
 | M | failedCount | 連続ログイン失敗回数 |
 | N | lockedUntil | 5回失敗で15分ロック |
 | O | createdAt | 登録日時 |
 | P | lastLoginAt | 最終ログイン |
+| Q | avatarImages | 表情ごとの写真 JSON：neutral / joy / sad / surprised / blink（瞬き）/ talk（しゃべり）の URL と DriveファイルID（既存シートには自動で列を追加） |
 
 ### History（会話履歴）
 
@@ -76,7 +78,7 @@ madobe/                  ← GitHub リポジトリ（GitHub Pages）
 1. **デプロイ → 新しいデプロイ → 種類：ウェブアプリ**
 2. 次のユーザーとして実行：**自分**／アクセスできるユーザー：**全員**
 3. 表示された `https://script.google.com/macros/s/…/exec` をコピー
-4. `script.js` 冒頭の `GAS_URL` に貼り付け
+4. `config.js` の `GAS_URL` に貼り付け（script.js を差し替えてもURLは消えません）
 
 > 🔁 **Code.gs を直したら、必ず「デプロイを管理 → 鉛筆 → バージョン：新しいバージョン → デプロイ」**。保存だけでは反映されません（URLはそのまま使えます）。
 
@@ -84,7 +86,7 @@ madobe/                  ← GitHub リポジトリ（GitHub Pages）
 
 ## 4. GitHub Pages に公開
 
-1. リポジトリ `madobe` を作成し、`index.html` / `style.css` / `script.js` を push
+1. リポジトリ `madobe` を作成し、`index.html` / `style.css` / `config.js` / `script.js` を push
 2. **Settings → Pages → Branch: main / (root)** で公開
 3. `https://kenken6291.github.io/madobe/` を開いて動作確認
 
@@ -108,7 +110,11 @@ madobe/                  ← GitHub リポジトリ（GitHub Pages）
 - **メール送信上限**：無料 Gmail は1日100通（MailApp）。
 - **写真の公開範囲**：アップロード画像は「リンクを知っている全員が閲覧可」になります。Google Workspace アカウントで組織外共有が禁止されている場合は表示されません（個人の Gmail アカウント推奨）。
 - **写真の表示**：`lh3.googleusercontent.com/d/ID` で表示し、失敗時は `drive.google.com/thumbnail` に自動で切り替えます。
+- **表情ごとの写真**：「普通の顔」「笑顔」「困り顔」「驚き顔」を登録でき、返事の感情に合わせて写真がふわっと切り替わります。登録していない表情は、普通の顔の色味・まぶた・眉で表現します。同じ構図で撮れば「目と口の位置は普通の顔と同じ」のままでOK、ずれる場合はその表情だけ位置を指定できます。
+- **瞬き・しゃべり写真**：普通の顔の「目を閉じた写真」「口を開けた写真」を登録すると、まばたきは目を閉じた写真に一瞬切り替え、話している間は口の開き具合に合わせて普通の顔と口を開けた写真を交互に表示します（普通の顔を表示しているときに使用）。
 - **写真アバターの仕組み**：写真を512px正方形に切り抜き、タップした目・口の位置に「まぶた（肌色を自動取得・手動調整可）」「口の開き」「眉（任意）」を重ねて、まばたき・口パク・表情を出します。写真全体の明るさ・彩度・傾きも表情に合わせて変わります。
-- **口パク**：返事の文字を1文字ずつ表示しながら、母音（あ・お・え・い/う）に合わせて口の開きを変えています。スピーカーボタンをオンにするとブラウザの読み上げで声も出ます。
+- **声**：返事は標準で読み上げます。声の種類・速さ・高さは「設定 → 声」でキャラクターごとに選べます（端末に入っている声から選択。Edge では自然な声が多く使えます）。
+- **聞き取りモード**：ヘッダーの「聞き取り」をオンにすると、返事のあと自動でマイクが聞き取りを始め、話し終わると自動で送信します。読み上げ中は自分の声を拾わないよう聞き取りを止めています。Chrome / Edge 推奨。
+- **全画面**：「全画面」でキャラクターを大きく表示。「設定 → 表示と会話」で字幕の有無・入力欄の非表示・ブラウザ全画面を切り替えられます。話している途中でキャラクターをタップすると止まります。
 - **安全面**：AIであることを聞かれたら正直に答える／深刻な悩みには相談窓口（よりそいホットライン・いのちの電話）を案内する、という指示をシステムプロンプトに入れています。
 - **Gemini モデル**：モデル名が廃止・変更された場合は `GEMINI_MODEL` プロパティだけ差し替えればOKです。
