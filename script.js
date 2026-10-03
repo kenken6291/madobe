@@ -15,6 +15,7 @@ const EMOTIONS = ['joy', 'neutral', 'sad', 'surprised'];
 const PHOTO_EMOS = ['neutral', 'joy', 'sad', 'surprised'];
 // 写真の種類：各表情ごとに「顔」「瞬き（目を閉じた）」「しゃべり（口を開けた）」
 const PHOTO_KINDS = ['base', 'blink', 'talk'];
+const MAX_CHARS = 10; // 写真のキャラクターは10人まで
 const EMO_LABELS = { neutral: '普通の顔', joy: '笑顔', sad: '困り顔', surprised: '驚き顔' };
 const KIND_LABELS = { base: '顔', blink: '瞬き', talk: 'しゃべり' };
 
@@ -53,7 +54,8 @@ const DEFAULT_PREFS = {
   showCaption: true,   // 全画面時の字幕
   hideInput: false,    // 全画面時に入力欄を隠す
   browserFs: true,     // ブラウザも全画面に
-  voices: {}           // キャラクターごとの声 { preset: {gVoice, gSpeed, voiceURI, rate, pitch} }
+  voices: {}           // 用意したキャラクターごとの声 { preset: {gVoice, gSpeed, voiceURI, rate, pitch} }
+                       // ※写真のキャラクターの声はサーバー（photoChars）に保存し、'custom:キャラID' で扱う
 };
 
 function loadPrefs() {
@@ -285,6 +287,18 @@ function userImages(u) {
   const o = Object.assign({}, u.avatarImages || {});
   if (!o.neutral && u.avatarImageUrl) o.neutral = u.avatarImageUrl;
   return o;
+}
+
+// ---- 写真のキャラクター（最大10人。名前・タイプ・写真・声をそれぞれに持つ） ----
+function isCustomKey(k) { return String(k || '').startsWith('custom'); }
+function charVoiceKey(id) { return 'custom:' + id; }
+function userChars(u) { return (u && Array.isArray(u.photoChars)) ? u.photoChars : []; }
+
+/** 写真のキャラクターの声（旧形式から移行した1人目は、端末に残っている声の設定を引き継ぐ） */
+function charVoice(c) {
+  if (c.voice && Object.keys(c.voice).length) return c.voice;
+  if (c.id === 'c_legacy' && prefs.voices.custom) return prefs.voices.custom;
+  return {};
 }
 
 // =========================================================
@@ -546,11 +560,11 @@ function autoVoice(preset) {
 }
 
 function defaultPitch(preset, category) {
+  if (isCustomKey(preset)) return category === 'pet' ? 1.4 : category === 'anime' ? 1.25 : 1.05;
   if (preset === 'person_m' || preset === 'anime_b') return 0.95;
   if (preset === 'person_f') return 1.1;
   if (preset === 'anime_g') return 1.3;
   if (preset === 'dog' || preset === 'cat') return 1.4;
-  if (preset === 'custom') return category === 'pet' ? 1.4 : category === 'anime' ? 1.25 : 1.05;
   return 1.1;
 }
 
@@ -568,7 +582,18 @@ function resolveVoice(voices, preset, category) {
   };
 }
 
-function curPreset() { return state.user ? state.user.avatarPreset : 'dog'; }
+/** いま話している相手の声のキー（写真のキャラクターは 'custom:キャラID'） */
+function curPreset() {
+  const u = state.user;
+  if (!u) return 'dog';
+  return u.avatarPreset === 'custom' && u.activeCharId ? charVoiceKey(u.activeCharId) : u.avatarPreset;
+}
+/** 用意したキャラクターの声（端末）＋写真のキャラクターの声（サーバー） */
+function curVoices() {
+  const m = Object.assign({}, prefs.voices);
+  userChars(state.user).forEach(c => { m[charVoiceKey(c.id)] = Object.assign({}, charVoice(c)); });
+  return m;
+}
 function curCategory() { return state.user ? state.user.avatarCategory : 'pet'; }
 
 function cleanForSpeech(t) {
@@ -582,7 +607,7 @@ function speak(text, opts) {
     const my = ++speakToken;
     const t = cleanForSpeech(text);
     if (!t) return resolve();
-    const o = opts || { voices: prefs.voices, preset: curPreset(), category: curCategory() };
+    const o = opts || { voices: curVoices(), preset: curPreset(), category: curCategory() };
     const r = resolveVoice(o.voices, o.preset, o.category);
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(t);
@@ -621,7 +646,7 @@ const DEFAULT_G_VOICE = { dog: 'Leda', cat: 'Aoede', person_f: 'Sulafat', person
 const CUSTOM_G_VOICE = { pet: 'Leda', person: 'Vindemiatrix', anime: 'Laomedeia' };
 
 function defaultGVoice(preset, category) {
-  return preset === 'custom' ? (CUSTOM_G_VOICE[category] || 'Leda') : (DEFAULT_G_VOICE[preset] || 'Leda');
+  return isCustomKey(preset) ? (CUSTOM_G_VOICE[category] || 'Leda') : (DEFAULT_G_VOICE[preset] || 'Leda');
 }
 
 /** サーバーへ渡す Gemini の声の指定 */
@@ -1136,7 +1161,7 @@ async function presentReply(text, emotion, audio) {
       await typewriter([bubble, cap], text, false, 1, perChar);
       await played;
     } else if (mode === 'device') {
-      const { rate } = resolveVoice(prefs.voices, curPreset(), curCategory());
+      const { rate } = resolveVoice(curVoices(), curPreset(), curCategory());
       const spoken = speak(text);
       mainAvatar.startFlap();
       await typewriter([bubble, cap], text, false, rate);
@@ -1175,7 +1200,7 @@ async function sendMessage(textArg) {
   try {
     ensureAudioCtx();
     const payload = { message: text };
-    if (useGeminiVoice()) payload.tts = geminiTtsOpts(prefs.voices, curPreset(), curCategory());
+    if (useGeminiVoice()) payload.tts = geminiTtsOpts(curVoices(), curPreset(), curCategory());
     const r = await api('chat', payload);
     typing.remove();
     await presentReply(r.reply, r.emotion, r.audio);
@@ -1201,7 +1226,7 @@ async function greet() {
   if (useGeminiVoice()) {
     const typing = addTyping();
     try {
-      const r = await api('tts', Object.assign({ text, emotion: 'joy' }, geminiTtsOpts(prefs.voices, curPreset(), curCategory())));
+      const r = await api('tts', Object.assign({ text, emotion: 'joy' }, geminiTtsOpts(curVoices(), curPreset(), curCategory())));
       audio = r.audio;
     } catch (_) { /* 端末の声に切り替え */ }
     typing.remove();
@@ -1349,25 +1374,37 @@ const VIEW_IDS = {
   stageMode: '#optStage', showCaption: '#optCaption', hideInput: '#optHideInput', browserFs: '#optBrowserFs'
 };
 
+function makePhotos(images) {
+  const photos = {};
+  PHOTO_SLOTS.forEach(e => { photos[e] = { src: (images && images[e]) || '', data: null, removed: false }; });
+  return photos;
+}
+const EMPTY_PHOTOS = makePhotos({});
+
 function openSettings(tab = 'char') {
   const u = state.user;
   stopSpeaking();
-  const imgs = userImages(u);
-  const photos = {};
-  PHOTO_SLOTS.forEach(e => { photos[e] = { src: imgs[e] || '', data: null, removed: false }; });
+  const chars = userChars(u).map(c => ({
+    id: c.id, name: c.name, category: c.category, photos: makePhotos(c.images), isNew: false
+  }));
+  const isCustom = u.avatarPreset === 'custom';
   Object.assign(draft, {
     tab,
-    companionName: u.companionName,
+    companionName: isCustom ? 'ポチ' : u.companionName,
     category: u.avatarCategory || 'pet',
     preset: u.avatarPreset || 'dog',
-    photos,
+    chars,
+    charId: chars.some(c => c.id === u.activeCharId) ? u.activeCharId : (chars[0] ? chars[0].id : ''),
+    deleted: [],
     slot: 'neutral',
     config: Object.assign(defaultConfig(), u.avatarConfig || {}),
-    voices: JSON.parse(JSON.stringify(prefs.voices || {})),
+    voices: JSON.parse(JSON.stringify(curVoices())),
     engine: prefs.ttsEngine || 'gemini',
     view: VIEW_KEYS.reduce((o, k) => (o[k] = prefs[k], o), {})
   });
-  $('#companionName').value = draft.companionName;
+  if (isCustom && curChar()) draft.category = curChar().category;
+  draft.sig0 = avatarSig();
+  renderNameField();
   setMsg($('#settingsMsg'), '');
   renderCategory();
   renderPresetGrid();
@@ -1423,14 +1460,122 @@ function renderPresetGrid() {
 
 function selectPreset(key) {
   draft.preset = key;
+  if (key === 'custom') {
+    if (!draft.chars.length) { addChar(); return; }
+    if (!curChar()) draft.charId = draft.chars[0].id;
+    draft.category = curChar().category;
+    renderCategory();
+  }
+  renderNameField();
   renderPresetGrid();
   renderPhotoSection();
   renderPreview();
 }
 
+// ---- 写真のキャラクターの選択・追加・削除 ----
+
+function curChar() { return (draft.chars || []).find(c => c.id === draft.charId) || null; }
+function curPhotos() { const c = curChar(); return c ? c.photos : EMPTY_PHOTOS; }
+/** 設定中のキャラクターの声のキー */
+function draftVoiceKey() { return draft.preset === 'custom' && draft.charId ? charVoiceKey(draft.charId) : draft.preset; }
+
+/** 変更があったかを調べるための目印 */
+function avatarSig() {
+  return JSON.stringify({
+    n: draft.companionName, c: draft.category, p: draft.preset, a: draft.charId, d: draft.deleted,
+    ch: draft.chars.map(c => [c.id, c.name, c.category,
+      PHOTO_SLOTS.filter(k => c.photos[k].data || c.photos[k].removed),
+      draft.voices[charVoiceKey(c.id)] || {}])
+  });
+}
+
+function renderNameField() {
+  const custom = draft.preset === 'custom';
+  const c = custom ? curChar() : null;
+  const input = $('#companionName');
+  input.value = custom ? (c ? c.name : '') : draft.companionName;
+  input.disabled = custom && !c;
+  input.placeholder = custom ? '例：おばあちゃん' : '';
+  $('#nameLabel').textContent = custom ? '名前（選んでいる写真のキャラクター）' : '名前';
+}
+
+function selectChar(id) {
+  draft.charId = id;
+  const c = curChar();
+  if (c) draft.category = c.category;
+  draft.slot = 'neutral';
+  renderCategory();
+  renderPresetGrid();
+  renderNameField();
+  renderPhotoSection();
+  renderPreview();
+  if (draft.tab === 'voice') renderVoicePanel();
+}
+
+function addChar() {
+  if (draft.chars.length >= MAX_CHARS) {
+    return setMsg($('#settingsMsg'), `写真のキャラクターは${MAX_CHARS}人までです`, 'error');
+  }
+  const c = {
+    id: 'new_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name: '', category: draft.category || 'person', photos: makePhotos({}), isNew: true
+  };
+  draft.chars.push(c);
+  draft.preset = 'custom';
+  setMsg($('#settingsMsg'), '');
+  selectChar(c.id);
+  setTimeout(() => $('#companionName').focus(), 50);
+}
+
+function deleteChar() {
+  const c = curChar();
+  if (!c) return;
+  if (!confirm(`写真のキャラクター「${c.name || '名前なし'}」を削除します。写真と声の設定も消えます。よろしいですか？`)) return;
+  const i = draft.chars.indexOf(c);
+  draft.chars.splice(i, 1);
+  if (!c.isNew) draft.deleted.push(c.id);
+  delete draft.voices[charVoiceKey(c.id)];
+  const next = draft.chars[Math.min(i, draft.chars.length - 1)];
+  selectChar(next ? next.id : '');
+  setMsg($('#settingsMsg'), '「保存する」で削除が確定します', 'ok');
+}
+
+/** キャラクターの一覧（タイル）。withAdd=true で「＋追加」も表示 */
+function renderCharTiles(box, withAdd) {
+  box.innerHTML = '';
+  draft.chars.forEach(c => {
+    const on = c.id === draft.charId;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'char-tile' + (on ? ' selected' : '');
+    b.setAttribute('aria-pressed', String(on));
+    const src = c.photos.neutral.src;
+    b.innerHTML = `<span class="char-thumb">${src ? `<img src="${escAttr(src)}" alt="" referrerpolicy="no-referrer">` : '👤'}</span>
+      <span class="char-name"></span>`;
+    b.querySelector('.char-name').textContent = c.name || '（名前なし）';
+    b.addEventListener('click', () => selectChar(c.id));
+    box.appendChild(b);
+  });
+  if (withAdd && draft.chars.length < MAX_CHARS) {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'char-tile add';
+    add.innerHTML = '<span class="char-thumb">＋</span><span class="char-name">追加する</span>';
+    add.addEventListener('click', addChar);
+    box.appendChild(add);
+  }
+}
+
+function renderCharList() {
+  renderCharTiles($('#charList'), true);
+  $('#charCount').textContent = `${draft.chars.length}／${MAX_CHARS}人`;
+  $('#charDelete').classList.toggle('hidden', !curChar());
+}
+
 function draftImages() {
   const o = {};
-  PHOTO_SLOTS.forEach(e => { if (draft.photos[e].src) o[e] = draft.photos[e].src; });
+  const photos = curPhotos();
+  PHOTO_SLOTS.forEach(e => { if (photos[e].src) o[e] = photos[e].src; });
   return o;
 }
 
@@ -1456,7 +1601,7 @@ function renderSlots() {
     row.appendChild(head);
     PHOTO_KINDS.forEach(kind => {
       const key = imgKey(emo, kind);
-      const ph = draft.photos[key];
+      const ph = curPhotos()[key];
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'photo-slot' + (draft.slot === key ? ' selected' : '');
@@ -1467,7 +1612,7 @@ function renderSlots() {
       b.addEventListener('click', () => {
         draft.slot = key;
         renderPhotoSection();
-        if (draft.photos.neutral.src) previewAvatar.setEmotion(emo, true);
+        if (curPhotos().neutral.src) previewAvatar.setEmotion(emo, true);
       });
       row.appendChild(b);
     });
@@ -1479,10 +1624,15 @@ function renderPhotoSection() {
   const on = draft.preset === 'custom';
   $('#photoSection').classList.toggle('hidden', !on);
   if (!on) return;
+  renderCharList();
+  const has = !!curChar();
+  $('#charEditor').classList.toggle('hidden', !has);
+  if (!has) return;
   renderSlots();
 
+  const photos = curPhotos();
   const s = draft.slot;
-  const ph = draft.photos[s];
+  const ph = photos[s];
   const isN = s === 'neutral';
   const { emo, kind } = parseKey(s);
   const emoName = EMO_LABELS[emo];
@@ -1496,10 +1646,10 @@ function renderPhotoSection() {
     hint = `「${emoName}」のまま口を開けた写真です。話している間、「${emoName}」と交互に切り替わります。`;
   }
   if (kind !== 'base') hint += `「${emoName}」と同じ位置・大きさで撮ってください。`;
-  if (kind !== 'base' && emo !== 'neutral' && !draft.photos[emo].src) {
+  if (kind !== 'base' && emo !== 'neutral' && !photos[emo].src) {
     hint += `※「${emoName}」の顔写真を登録していないと使われません。`;
   }
-  if (kind === 'base' && !draft.photos[imgKey(emo, 'blink')].src && ph.src) {
+  if (kind === 'base' && !photos[imgKey(emo, 'blink')].src && ph.src) {
     hint += `「${emoName}」の瞬き写真がないと、この表情ではまばたきしません。`;
   }
   $('#slotHint').textContent = hint;
@@ -1528,10 +1678,17 @@ function loadAndCropImage(file) {
 // ---- 声パネル ----
 
 function renderVoicePanel() {
-  const key = draft.preset;
+  const key = draftVoiceKey();
   const s = voiceSettingFor(draft.voices, key);
-  const name = $('#companionName').value.trim() || draft.companionName;
-  $('#voiceFor').textContent = `「${name}」（${presetLabel(key)}）の声を設定します。キャラクターごとに覚えます。`;
+  const custom = draft.preset === 'custom';
+  const c = custom ? curChar() : null;
+  const name = custom ? (c && c.name.trim() ? c.name.trim() : '写真のキャラクター') : (draft.companionName.trim() || 'キャラクター');
+  $('#voiceFor').textContent = custom
+    ? `写真のキャラクター「${name}」の声を設定します。写真のキャラクター（最大${MAX_CHARS}人）は、1人ずつ別の声を設定できます。`
+    : `「${name}」（${presetLabel(draft.preset)}）の声を設定します。キャラクターごとに覚えます。`;
+  const showChars = custom && draft.chars.length > 0;
+  $('#voiceCharBox').classList.toggle('hidden', !showChars);
+  if (showChars) renderCharTiles($('#voiceCharList'), false);
 
   // Gemini の声
   const isG = draft.engine === 'gemini';
@@ -1605,7 +1762,7 @@ function rateLabel(r) {
 }
 
 function setDraftVoice(patch) {
-  const k = draft.preset;
+  const k = draftVoiceKey();
   draft.voices[k] = Object.assign(voiceSettingFor(draft.voices, k), patch);
 }
 
@@ -1767,7 +1924,7 @@ function bindMaker() {
       if (!buf) {
         try {
           const t = await api('tts', Object.assign({ text: 'こんにちは。この声でお話しするね。', emotion: 'joy' },
-            geminiTtsOpts(draft.voices, draft.preset, draft.category)));
+            geminiTtsOpts(draft.voices, draftVoiceKey(), draft.category)));
           buf = await prepareAudio(t.audio);
         } catch (_) { /* 試し聞きできなくても作成は完了 */ }
       }
@@ -1783,8 +1940,8 @@ function bindMaker() {
     withBusy($('#deleteVoiceBtn'), async () => {
       const r = await api('deleteVoice', { id });
       state.user = r.user;
-      Object.keys(draft.voices).forEach(k => { if (draft.voices[k].gVoice === id) draft.voices[k].gVoice = ''; });
-      Object.keys(prefs.voices).forEach(k => { if (prefs.voices[k].gVoice === id) prefs.voices[k].gVoice = ''; });
+      Object.keys(draft.voices).forEach(k => { if (draft.voices[k] && draft.voices[k].gVoice === id) draft.voices[k].gVoice = ''; });
+      Object.keys(prefs.voices).forEach(k => { if (prefs.voices[k] && prefs.voices[k].gVoice === id) prefs.voices[k].gVoice = ''; });
       savePrefs();
       renderVoicePanel();
       setMsg($('#settingsMsg'), `「${v.label}」を削除しました`, 'ok');
@@ -1809,10 +1966,25 @@ function renderViewPanel() {
 function bindSettings() {
   $$('.stab').forEach(b => b.addEventListener('click', () => switchSettingsTab(b.dataset.stab)));
 
+  $('#companionName').addEventListener('input', e => {
+    const c = draft.preset === 'custom' ? curChar() : null;
+    if (c) {
+      c.name = e.target.value;
+      renderCharList();
+    } else if (draft.preset !== 'custom') {
+      draft.companionName = e.target.value;
+    }
+  });
+  $('#charDelete').addEventListener('click', deleteChar);
+
   $$('#categorySeg button').forEach(b => b.addEventListener('click', () => {
     draft.category = b.dataset.cat;
-    if (draft.preset !== 'custom' && PRESETS[draft.preset].category !== draft.category) {
+    if (draft.preset === 'custom') {
+      const c = curChar();
+      if (c) c.category = draft.category; // 写真のキャラクターのタイプ（話し方・おまかせの声に使う）
+    } else if (PRESETS[draft.preset].category !== draft.category) {
       draft.preset = Object.keys(PRESETS).find(k => PRESETS[k].category === draft.category);
+      renderNameField();
     }
     renderCategory();
     renderPresetGrid();
@@ -1826,9 +1998,11 @@ function bindSettings() {
     if (!f) return;
     if (f.size > 15 * 1024 * 1024) return setMsg($('#settingsMsg'), '写真が大きすぎます（15MBまで）', 'error');
     const slot = draft.slot;
+    const c = curChar();
+    if (!c) return;
     try {
       const dataUrl = await loadAndCropImage(f);
-      draft.photos[slot] = { src: dataUrl, data: dataUrl, removed: false };
+      c.photos[slot] = { src: dataUrl, data: dataUrl, removed: false };
       setMsg($('#settingsMsg'), '');
       renderPhotoSection();
       renderPreview();
@@ -1839,8 +2013,9 @@ function bindSettings() {
 
   $('#slotRemove').addEventListener('click', () => {
     const slot = draft.slot;
-    if (slot === 'neutral') return;
-    draft.photos[slot] = { src: '', data: null, removed: true };
+    const c = curChar();
+    if (slot === 'neutral' || !c) return;
+    c.photos[slot] = { src: '', data: null, removed: true };
     renderPhotoSection();
     renderPreview();
   });
@@ -1890,13 +2065,14 @@ function bindSettings() {
   }));
 
   const sampleText = () => {
-    const name = $('#companionName').value.trim() || draft.companionName;
+    const c = draft.preset === 'custom' ? curChar() : null;
+    const name = (c ? c.name.trim() : draft.companionName.trim()) || 'まどべ';
     return `こんにちは、${name}です。今日もいっしょにお話ししようね。`;
   };
   const deviceTest = async () => {
     if (!TTS_OK) return setMsg($('#settingsMsg'), 'このブラウザは端末の声に対応していません', 'error');
     previewAvatar.startFlap();
-    await speak(sampleText(), { voices: draft.voices, preset: draft.preset, category: draft.category });
+    await speak(sampleText(), { voices: draft.voices, preset: draftVoiceKey(), category: draft.category });
     previewAvatar.stopTalking();
   };
 
@@ -1909,7 +2085,7 @@ function bindSettings() {
       let buf = null;
       try {
         const r = await api('tts', Object.assign({ text: sampleText(), emotion: 'joy' },
-          geminiTtsOpts(draft.voices, draft.preset, draft.category)));
+          geminiTtsOpts(draft.voices, draftVoiceKey(), draft.category)));
         buf = await prepareAudio(r.audio);
       } catch (err) {
         setMsg($('#settingsMsg'), `Gemini の声を作れませんでした（${err.message}）。端末の声で再生します。`, 'error');
@@ -1928,47 +2104,65 @@ function bindSettings() {
 
   $('#settingsSave').addEventListener('click', () => {
     const msg = $('#settingsMsg');
-    const u = state.user;
-    const name = $('#companionName').value.trim();
-    if (!name) { switchSettingsTab('char'); return setMsg(msg, '名前を入力してください', 'error'); }
+    const custom = draft.preset === 'custom';
+    const presetName = draft.companionName.trim();
+    if (!custom && !presetName) { switchSettingsTab('char'); return setMsg(msg, '名前を入力してください', 'error'); }
 
-    const photoChanged = PHOTO_SLOTS.some(e => draft.photos[e].data || draft.photos[e].removed);
-    const avatarChanged =
-      name !== u.companionName || draft.category !== u.avatarCategory || draft.preset !== u.avatarPreset ||
-      photoChanged;
-
-    if (avatarChanged && draft.preset === 'custom') {
-      const fail = (slot, text) => {
-        switchSettingsTab('char');
+    // 写真のキャラクターの確認（名前と「普通の顔」の写真は必須）
+    const fail = (c, slot, text) => {
+      switchSettingsTab('char');
+      if (c) {
+        draft.preset = 'custom';
+        selectChar(c.id);
         draft.slot = slot;
         renderPhotoSection();
-        setMsg(msg, text, 'error');
-      };
-      if (!draft.photos.neutral.src) return fail('neutral', '「普通の顔」の写真を選んでください');
+      }
+      setMsg(msg, text, 'error');
+    };
+    for (const c of draft.chars) {
+      if (!c.name.trim()) return fail(c, 'neutral', '写真のキャラクターの名前を入力してください');
+      if (c.name.trim().length > 20) return fail(c, 'neutral', '名前は20文字以内にしてください');
+      if (!c.photos.neutral.src) return fail(c, 'neutral', `「${c.name.trim()}」の「普通の顔」の写真を選んでください`);
     }
+    if (custom && !curChar()) return fail(null, 'neutral', '写真のキャラクターを追加してください');
+
+    const avatarChanged = avatarSig() !== draft.sig0;
 
     withBusy($('#settingsSave'), async () => {
       if (avatarChanged) {
+        const hasNew = draft.chars.some(c => PHOTO_SLOTS.some(k => c.photos[k].data));
+        if (hasNew) setMsg(msg, '写真を保存しています…（枚数が多いと少し時間がかかります）');
         const payload = {
-          companionName: name,
+          companionName: custom ? curChar().name.trim() : presetName,
           avatarCategory: draft.category,
           avatarPreset: draft.preset,
-          avatarConfig: draft.config
+          avatarConfig: draft.config,
+          activeCharId: draft.charId,
+          deleteChars: draft.deleted,
+          chars: draft.chars.map(c => {
+            const images = {};
+            PHOTO_SLOTS.forEach(k => { if (c.photos[k].data) images[k] = c.photos[k].data; });
+            return {
+              id: c.id,
+              name: c.name.trim(),
+              category: c.category,
+              voice: draft.voices[charVoiceKey(c.id)] || {},
+              images,
+              removeImages: PHOTO_SLOTS.filter(k => c.photos[k].removed)
+            };
+          })
         };
-        if (draft.preset === 'custom') {
-          const images = {};
-          PHOTO_SLOTS.forEach(e => { if (draft.photos[e].data) images[e] = draft.photos[e].data; });
-          if (Object.keys(images).length) payload.images = images;
-          const removes = PHOTO_SLOTS.filter(e => draft.photos[e].removed);
-          if (removes.length) payload.removeImages = removes;
-        }
         const r = await api('saveAvatar', payload);
         state.user = r.user;
         applyUser();
       }
 
       const wasStage = prefs.stageMode;
-      prefs.voices = draft.voices;
+      // 写真のキャラクターの声はサーバーに保存済み。端末には用意したキャラクターの声だけ残す
+      const local = {};
+      Object.keys(draft.voices).forEach(k => { if (!isCustomKey(k)) local[k] = draft.voices[k]; });
+      if (prefs.voices.custom) local.custom = prefs.voices.custom;
+      prefs.voices = local;
       prefs.ttsEngine = draft.engine;
       VIEW_KEYS.forEach(k => { prefs[k] = draft.view[k]; });
       savePrefs();

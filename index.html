@@ -225,7 +225,7 @@
           <!-- キャラクター -->
           <div data-spanel="char">
             <label class="field">
-              <span>名前</span>
+              <span id="nameLabel">名前</span>
               <input type="text" id="companionName" maxlength="20">
             </label>
 
@@ -244,6 +244,14 @@
             </div>
 
             <div id="photoSection" class="photo-section hidden">
+              <div class="field">
+                <span>写真のキャラクター（<span id="charCount"></span>）</span>
+                <p class="hint">写真のキャラクターは10人まで登録できます。選んだキャラクターが話し相手になります。名前・タイプ・声もキャラクターごとに設定できます。</p>
+                <div id="charList" class="char-list"></div>
+                <button type="button" id="charDelete" class="link-btn hidden">このキャラクターを削除する</button>
+              </div>
+
+              <div id="charEditor">
               <p class="hint">表情（普通の顔・笑顔・困り顔・驚き顔）ごとに、「顔」「瞬き（目を閉じた）」「しゃべり（口を開けた）」の写真を登録できます。必須は「普通の顔」の顔写真だけです。まばたき・口の動きは、写真の切り替えだけで表します。</p>
               <div id="photoSlots" class="photo-slots"></div>
 
@@ -259,12 +267,18 @@
                 <p id="slotHint" class="hint"></p>
 
               </div>
+              </div><!-- /charEditor -->
             </div>
           </div>
 
           <!-- 声 -->
           <div data-spanel="voice" class="hidden">
             <p id="voiceFor" class="voice-for"></p>
+
+            <div id="voiceCharBox" class="field hidden">
+              <span>声を設定する写真のキャラクター</span>
+              <div id="voiceCharList" class="char-list compact"></div>
+            </div>
 
             <label class="opt gemini-switch">
               <input type="checkbox" class="switch" id="optGemini">
@@ -326,7 +340,7 @@
                   <input type="text" id="makerLabel" maxlength="20" placeholder="例：やさしい声">
                 </label>
                 <button type="button" id="makeVoiceBtn" class="btn primary">この声を作る</button>
-                <p class="hint">作った声はこのアカウントで最大3つまで使えます。声のサンプルと同意の録音は、声を作るためだけに Google に送られ、まどべには保存しません。</p>
+                <p class="hint">作った声はこのアカウントで最大10個まで使えます（写真のキャラクター1人に1つずつ作れます）。声のサンプルと同意の録音は、声を作るためだけに Google に送られ、まどべには保存しません。</p>
               </details>
             </div>
 

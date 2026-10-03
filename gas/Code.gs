@@ -11,6 +11,7 @@
  * スクリプトプロパティ（任意）
  *   GEMINI_MODEL     : 会話モデル（既定 gemini-2.5-flash）
  *   TTS_MODEL        : 声のモデル（既定 gemini-3.8-flash-tts）
+ *                      ※写真のキャラクターは最大10人。声はキャラクターごとに photoChars 列へ保存
  *                      ※設定画面で「Gemini の声」をオンにした人だけ使用。オフの人は端末の声で話し、
  *                        Gemini には会話（GEMINI_MODEL）だけを送る
  *   APP_URL          : メール本文に載せるアプリURL（未設定なら DEFAULT_APP_URL）
@@ -27,7 +28,7 @@ const USER_HEADERS = [
   'companionName', 'avatarCategory', 'avatarPreset',
   'avatarImageUrl', 'avatarImageId', 'avatarConfig',
   'failedCount', 'lockedUntil', 'createdAt', 'lastLoginAt',
-  'avatarImages', 'customVoices'
+  'avatarImages', 'customVoices', 'photoChars', 'activeCharId'
 ];
 const HISTORY_HEADERS = ['timestamp', 'userId', 'role', 'text', 'emotion'];
 
@@ -49,6 +50,10 @@ const IMAGE_KEYS = [
 // 目の位置を個別登録できる写真（瞬き写真は不要）
 const PER_EYE_KEYS = ['joy', 'sad', 'surprised', 'talk', 'joy_talk', 'sad_talk', 'surprised_talk'];
 const CATEGORIES = ['pet', 'person', 'anime'];
+// 写真のキャラクター（1人あたり最大10人）。それぞれに名前・タイプ・写真・声を持つ
+const MAX_CHARS = 10;
+const LEGACY_CHAR_ID = 'c_legacy'; // 旧形式（写真1組）から移行したキャラクター
+const SPEEDS = ['slow', 'normal', 'fast'];
 const PRESETS = ['dog', 'cat', 'person_f', 'person_m', 'anime_g', 'anime_b', 'custom'];
 
 // ================= エントリポイント =================
@@ -261,6 +266,10 @@ function parseImages_(v, user) {
 }
 
 function publicUser_(u) {
+  const chars = parseChars_(u);
+  const activeId = activeCharId_(u, chars);
+  const active = chars.filter(function (c) { return c.id === activeId; })[0] || null;
+  const isCustom = String(u.avatarPreset) === 'custom';
   return {
     name: String(u.name),
     email: String(u.email),
@@ -268,19 +277,98 @@ function publicUser_(u) {
     companionName: String(u.companionName || 'ポチ'),
     avatarCategory: String(u.avatarCategory || 'pet'),
     avatarPreset: String(u.avatarPreset || 'dog'),
-    avatarImageUrl: String(u.avatarImageUrl || ''),
-    avatarImages: (function () {
-      const imgs = parseImages_(u.avatarImages, u);
-      const o = {};
-      IMAGE_KEYS.forEach(function (e) { o[e] = imgs[e].url; });
-      return o;
-    })(),
+    avatarImageUrl: isCustom && active && active.images.neutral ? imgUrl_(active.images.neutral) : '',
+    avatarImages: imageUrls_(isCustom && active ? active.images : {}),
+    photoChars: chars.map(function (c) {
+      return { id: c.id, name: c.name, category: c.category, images: imageUrls_(c.images), voice: c.voice };
+    }),
+    activeCharId: activeId,
     avatarConfig: parseConfig_(u.avatarConfig),
     customVoices: parseVoices_(u.customVoices).map(function (v) {
       return { id: v.id, label: v.label, type: v.type, summary: v.summary || '' };
     })
   };
 }
+
+// ---- 写真のキャラクター（photoChars 列） ----
+// [{ id, name, category, images: { neutral: DriveファイルID, blink: …, joy_talk: … }, voice: {gVoice, gSpeed, voiceURI, rate, pitch} }]
+
+function imgUrl_(id) { return id ? 'https://lh3.googleusercontent.com/d/' + id : ''; }
+
+function idFromUrl_(url) {
+  const m = String(url || '').match(/\/d\/([\w-]{10,})/) || String(url || '').match(/[?&]id=([\w-]{10,})/);
+  return m ? m[1] : '';
+}
+
+function imageUrls_(images) {
+  const o = {};
+  IMAGE_KEYS.forEach(function (k) { o[k] = imgUrl_(images && images[k]); });
+  return o;
+}
+
+function sanitizeVoice_(v, user) {
+  v = v && typeof v === 'object' ? v : {};
+  const out = {};
+  const g = String(v.gVoice || '');
+  if (TTS_VOICES.indexOf(g) >= 0 ||
+      (/^voice_[\w-]+$/.test(g) && parseVoices_(user.customVoices).some(function (x) { return x.id === g; }))) {
+    out.gVoice = g;
+  }
+  if (SPEEDS.indexOf(v.gSpeed) >= 0) out.gSpeed = v.gSpeed;
+  if (v.voiceURI) out.voiceURI = String(v.voiceURI).slice(0, 200);
+  const r = Number(v.rate);
+  if (v.rate != null && isFinite(r) && r > 0) out.rate = Math.min(1.6, Math.max(0.6, r));
+  if (v.pitch != null && v.pitch !== '') {
+    const p = Number(v.pitch);
+    if (isFinite(p)) out.pitch = Math.min(2, Math.max(0.5, p));
+  }
+  return out;
+}
+
+/** photoChars 列を読む。列が空（まだ一度も保存していない）なら旧形式の写真から1人目を作る */
+function parseChars_(user) {
+  const raw = String(user.photoChars == null ? '' : user.photoChars).trim();
+  if (!raw) {
+    const imgs = parseImages_(user.avatarImages, user);
+    const images = {};
+    IMAGE_KEYS.forEach(function (k) {
+      const id = imgs[k].id || idFromUrl_(imgs[k].url);
+      if (id) images[k] = id;
+    });
+    if (!images.neutral) return [];
+    const isCustom = String(user.avatarPreset) === 'custom';
+    return [{
+      id: LEGACY_CHAR_ID,
+      name: isCustom ? String(user.companionName || '写真の人') : '写真の人',
+      category: isCustom && CATEGORIES.indexOf(user.avatarCategory) >= 0 ? String(user.avatarCategory) : 'person',
+      images: images,
+      voice: {}
+    }];
+  }
+  let arr;
+  try { arr = JSON.parse(raw); } catch (e) { arr = []; }
+  if (!Array.isArray(arr)) return [];
+  return arr.filter(function (c) { return c && /^c[\w-]{1,40}$/.test(String(c.id)); }).slice(0, MAX_CHARS).map(function (c) {
+    const images = {};
+    const src = c.images && typeof c.images === 'object' ? c.images : {};
+    IMAGE_KEYS.forEach(function (k) { if (/^[\w-]{10,}$/.test(String(src[k] || ''))) images[k] = String(src[k]); });
+    return {
+      id: String(c.id),
+      name: String(c.name || '').slice(0, 20),
+      category: CATEGORIES.indexOf(c.category) >= 0 ? c.category : 'person',
+      images: images,
+      voice: sanitizeVoice_(c.voice, user)
+    };
+  });
+}
+
+function activeCharId_(user, chars) {
+  const id = String(user.activeCharId || '');
+  if (chars.some(function (c) { return c.id === id; })) return id;
+  return chars.length ? chars[0].id : '';
+}
+
+function newCharId_() { return 'c' + Utilities.getUuid().replace(/-/g, '').slice(0, 12); }
 
 // ---- セッション（CacheService） ----
 
@@ -360,6 +448,8 @@ function register_(req) {
     sendTempPasswordMail_(email, name, temp, false); // 送信成功後に登録
     user.avatarImages = '{}';
     user.customVoices = '[]';
+    user.photoChars = '[]';
+    user.activeCharId = '';
     const us = sheet_(SHEET_USERS);
     const headers = us.getRange(1, 1, 1, us.getLastColumn()).getValues()[0];
     us.appendRow(headers.map(function (h) { return user[h] == null ? '' : user[h]; }));
@@ -434,43 +524,96 @@ function logout_(req) {
 
 function saveAvatar_(req) {
   const user = auth_(req, false);
-  const companionName = String(req.companionName || '').trim();
-  if (!companionName || companionName.length > 20) throw new Error('名前は1〜20文字で入力してください');
   const category = CATEGORIES.indexOf(req.avatarCategory) >= 0 ? req.avatarCategory : 'pet';
   const preset = PRESETS.indexOf(req.avatarPreset) >= 0 ? req.avatarPreset : 'dog';
 
+  let chars = parseChars_(user);
+  const del = Array.isArray(req.deleteChars) ? req.deleteChars.map(String) : [];
+  const incoming = Array.isArray(req.chars) ? req.chars.slice(0, 30) : [];
+  const isData = function (v) { return typeof v === 'string' && /^data:image\//.test(v); };
+
+  // ---- 先にすべて確認してから保存する（途中で失敗して写真だけ残るのを防ぐ） ----
+  const kept = chars.filter(function (c) { return del.indexOf(c.id) < 0; });
+  let count = kept.length;
+  const plans = [];
+  incoming.forEach(function (inc) {
+    if (!inc || typeof inc !== 'object') return;
+    const id = String(inc.id || '');
+    let cur = kept.filter(function (c) { return c.id === id; })[0] || null;
+    if (!cur) {
+      if (!/^new_[\w-]{1,40}$/.test(id)) return; // 削除済みなど、知らないIDは無視
+      count++;
+    }
+    const name = String(inc.name || '').trim();
+    if (!name || name.length > 20) throw new Error('写真のキャラクターの名前は1〜20文字で入力してください');
+    const imgs = inc.images && typeof inc.images === 'object' ? inc.images : {};
+    const removes = Array.isArray(inc.removeImages) ? inc.removeImages : [];
+    const hasNeutral = isData(imgs.neutral) || (cur && cur.images.neutral);
+    if (!hasNeutral) throw new Error('「' + name + '」の「普通の顔」の写真を選んでください');
+    plans.push({ id: id, cur: cur, name: name, imgs: imgs, removes: removes, inc: inc });
+  });
+  if (count > MAX_CHARS) throw new Error('写真のキャラクターは' + MAX_CHARS + '人までです');
+
+  // ---- 削除 ----
+  chars.forEach(function (c) {
+    if (del.indexOf(c.id) < 0) return;
+    Object.keys(c.images).forEach(function (k) { trashFile_(c.images[k]); });
+  });
+  chars = kept;
+
+  // ---- 追加・更新 ----
+  const idMap = {};
+  plans.forEach(function (p) {
+    let c = p.cur;
+    if (!c) {
+      c = { id: newCharId_(), name: '', category: 'person', images: {}, voice: {} };
+      chars.push(c);
+      idMap[p.id] = c.id;
+    }
+    c.name = p.name;
+    c.category = CATEGORIES.indexOf(p.inc.category) >= 0 ? p.inc.category : c.category;
+    c.voice = sanitizeVoice_(p.inc.voice, user);
+    IMAGE_KEYS.forEach(function (k) {
+      if (!isData(p.imgs[k])) return;
+      const saved = saveImage_(user, c.id + '_' + k, p.imgs[k]);
+      trashFile_(c.images[k]);
+      c.images[k] = saved.id;
+    });
+    p.removes.forEach(function (k) {
+      if (k === 'neutral' || IMAGE_KEYS.indexOf(k) < 0 || !c.images[k]) return;
+      trashFile_(c.images[k]);
+      delete c.images[k];
+    });
+  });
+
+  let activeId = String(req.activeCharId || '');
+  if (idMap[activeId]) activeId = idMap[activeId];
+  if (!chars.some(function (c) { return c.id === activeId; })) activeId = chars.length ? chars[0].id : '';
+  const active = chars.filter(function (c) { return c.id === activeId; })[0] || null;
+
+  const json = JSON.stringify(chars);
+  if (json.length > 45000) throw new Error('保存できる量を超えました');
+
   const fields = {
-    companionName: safe_(companionName),
     avatarCategory: category,
     avatarPreset: preset,
-    avatarConfig: JSON.stringify(sanitizeConfig_(req.avatarConfig))
+    avatarConfig: JSON.stringify(sanitizeConfig_(req.avatarConfig)),
+    photoChars: json,
+    activeCharId: activeId,
+    // 旧形式の列（写真は photoChars に移行済み）
+    avatarImages: '',
+    avatarImageId: '',
+    avatarImageUrl: active && active.images.neutral ? imgUrl_(active.images.neutral) : ''
   };
 
-  const imgs = parseImages_(user.avatarImages, user);
-  const incoming = Object.assign({}, req.images || {});
-  if (req.imageBase64 && !incoming.neutral) incoming.neutral = req.imageBase64; // 旧形式
-
-  let changed = false;
-  IMAGE_KEYS.forEach(function (e) {
-    if (!incoming[e]) return;
-    const saved = saveImage_(user, e, incoming[e]);
-    trashFile_(imgs[e].id);
-    imgs[e] = saved;
-    changed = true;
-  });
-  (Array.isArray(req.removeImages) ? req.removeImages : []).forEach(function (e) {
-    if (e === 'neutral' || IMAGE_KEYS.indexOf(e) < 0 || !imgs[e].url) return;
-    trashFile_(imgs[e].id);
-    imgs[e] = { url: '', id: '' };
-    changed = true;
-  });
-
-  if (preset === 'custom' && !imgs.neutral.url) throw new Error('「普通の顔」の写真を選んでください');
-
-  if (changed || !user.avatarImages) {
-    fields.avatarImages = JSON.stringify(imgs);
-    fields.avatarImageUrl = imgs.neutral.url;
-    fields.avatarImageId = imgs.neutral.id;
+  if (preset === 'custom') {
+    if (!active) throw new Error('写真のキャラクターを追加してください');
+    fields.companionName = safe_(active.name);
+    fields.avatarCategory = active.category;
+  } else {
+    const companionName = String(req.companionName || '').trim();
+    if (!companionName || companionName.length > 20) throw new Error('名前は1〜20文字で入力してください');
+    fields.companionName = safe_(companionName);
   }
 
   updateUser_(user, fields);
@@ -809,7 +952,7 @@ function tts_(req) {
 
 // ================= サンプルから声を作る（Voice design / Voice replication） =================
 
-const MAX_CUSTOM_VOICES = 3; // 1人あたり（プロジェクト全体の上限は200）
+const MAX_CUSTOM_VOICES = 10; // 1人あたり（写真のキャラクター10人に1つずつ。プロジェクト全体の上限は200）
 
 function parseVoices_(v) {
   try {
@@ -983,7 +1126,13 @@ function deleteVoice_(req) {
   if (!list.some(function (v) { return v.id === id; })) throw new Error('その声は見つかりません');
   try { voicesApi_('delete', '/' + encodeURIComponent(id)); } catch (e) { if (e.status !== 404) throw e; }
   const rest = list.filter(function (v) { return v.id !== id; });
-  updateUser_(user, { customVoices: JSON.stringify(rest) });
+  const fields = { customVoices: JSON.stringify(rest) };
+  // この声を使っていた写真のキャラクターは「おまかせ」に戻す
+  const chars = parseChars_(user);
+  let touched = false;
+  chars.forEach(function (c) { if (c.voice.gVoice === id) { delete c.voice.gVoice; touched = true; } });
+  if (touched) fields.photoChars = JSON.stringify(chars);
+  updateUser_(user, fields);
   return { user: publicUser_(user) };
 }
 

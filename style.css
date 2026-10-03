@@ -520,6 +520,27 @@ input[type="range"]:disabled { opacity: .45; }
 .preset-tile.selected { border-color: var(--teal); background: color-mix(in srgb, var(--teal) 10%, var(--paper)); }
 
 .photo-section { border-top: 1px dashed var(--line); padding-top: 16px; }
+
+/* 写真のキャラクター一覧（最大10人） */
+.char-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; margin-bottom: 6px; }
+.char-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0;
+  padding: 8px 4px; border: 2px solid var(--line); border-radius: var(--radius-m);
+  background: var(--paper); color: var(--ink); font-size: .82rem; cursor: pointer;
+}
+.char-tile .char-thumb {
+  width: 56px; height: 56px; border-radius: 50%; overflow: hidden;
+  display: grid; place-items: center; font-size: 1.6rem;
+  background: color-mix(in srgb, var(--ink) 6%, var(--paper));
+}
+.char-tile .char-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.char-tile .char-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.char-tile.selected { border-color: var(--teal); background: color-mix(in srgb, var(--teal) 10%, var(--paper)); }
+.char-tile.add { border-style: dashed; color: var(--teal); font-weight: 700; }
+.char-tile.add .char-thumb { color: var(--teal); }
+.char-list.compact { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); }
+.char-list.compact .char-thumb { width: 40px; height: 40px; font-size: 1.2rem; }
+#charEditor { margin-top: 10px; }
 .file-btn { cursor: pointer; margin-bottom: 8px; }
 .calib-text { font-weight: 700; margin: 4px 0 8px; }
 .calib-text.done { color: var(--ok); }
