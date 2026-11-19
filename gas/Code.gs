@@ -9,7 +9,9 @@
  *   DRIVE_FOLDER_ID  : アバター画像を保存する Drive フォルダID
  *   PASSWORD_PEPPER  : 任意の長いランダム文字列（パスワードハッシュ用）
  * スクリプトプロパティ（任意）
- *   GEMINI_MODEL     : 会話モデル（既定 gemini-2.5-flash）
+ *   GEMINI_MODEL     : 会話モデルの既定値（任意。未設定なら汎用の最新モデル FALLBACK_GEMINI_MODELS）
+ *                      ※画面の「AIモデル」で選んだモデルが優先。該当がない（廃止・未公開・名前違い）ときは
+ *                        FALLBACK_GEMINI_MODELS を先頭から順に試して自動で切り替える
  *   TTS_MODEL        : 声のモデル（既定 gemini-3.8-flash-tts）
  *                      ※写真のキャラクターは最大10人。声はキャラクターごとに photoChars 列へ保存
  *                      ※設定画面で「Gemini の声」をオンにした人だけ使用。オフの人は端末の声で話し、
@@ -56,10 +58,21 @@ const LEGACY_CHAR_ID = 'c_legacy'; // 旧形式（写真1組）から移行し�
 const SPEEDS = ['slow', 'normal', 'fast'];
 const PRESETS = ['dog', 'cat', 'person_f', 'person_m', 'anime_g', 'anime_b', 'custom'];
 
+// ---- Gemini 会話モデル ----
+// 汎用の最新モデル（自動モード・切り替え先）。先頭から順に試す
+//   gemini-flash-latest : Googleが常に最新の汎用モデルへ自動で差し替えるエイリアス
+//   gemini-4-hydrogen   : 2026年11月時点の汎用最新モデル（「日々の暮らしをサポート」）
+//   gemini-3.8-flash    : 最終的な保険
+const FALLBACK_GEMINI_MODELS = ['gemini-flash-latest', 'gemini-4-hydrogen', 'gemini-3.8-flash'];
+const GEMINI_MODEL_PATTERN = /^gemini-[a-z0-9][a-z0-9.\-]{0,60}$/;
+
 // ================= エントリポイント =================
 
 function doGet() {
-  return json_({ ok: true, app: APP_NAME, message: 'API is running' });
+  return json_({
+    ok: true, app: APP_NAME, message: 'API is running',
+    defaultModel: resolveGeminiModel_(''), fallbackModels: FALLBACK_GEMINI_MODELS, ttsModel: ttsModel_()
+  });
 }
 
 function doPost(e) {
@@ -648,7 +661,8 @@ function chat_(req) {
   if (text.length > 1000) throw new Error('メッセージは1000文字以内にしてください');
 
   const history = getRecentHistory_(user.userId, HISTORY_CONTEXT);
-  const reply = callGemini_(user, history, text);
+  const requestedModel = resolveGeminiModel_(req.model);
+  const reply = callGemini_(user, history, text, requestedModel);
 
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
@@ -673,7 +687,10 @@ function chat_(req) {
       console.error('TTS error: ' + ttsError);
     }
   }
-  return { reply: reply.reply, emotion: reply.emotion, audio: audio, ttsError: ttsError };
+  return {
+    reply: reply.reply, emotion: reply.emotion, audio: audio, ttsError: ttsError,
+    model: reply.model, requestedModel: requestedModel, fallback: reply.model !== requestedModel
+  };
 }
 
 function getRecentHistory_(userId, limit) {
@@ -772,10 +789,9 @@ function buildSystemPrompt_(user) {
   ].join('\n');
 }
 
-function callGemini_(user, history, message) {
+function callGemini_(user, history, message, model) {
   const key = props_().getProperty('GEMINI_API_KEY');
   if (!key) throw new Error('GEMINI_API_KEY が未設定です');
-  const model = props_().getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
 
   // 先頭は user から始める
   while (history.length && history[0].role !== 'user') history.shift();
@@ -805,39 +821,79 @@ function callGemini_(user, history, message) {
     }
   };
 
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'x-goog-api-key': key },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  let res, code;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    res = UrlFetchApp.fetch(url, options);
-    code = res.getResponseCode();
-    if (code !== 429 && code !== 503 && code !== 500) break;
-    Utilities.sleep(1200 * (attempt + 1));
-  }
+  const r = fetchGemini_(model || resolveGeminiModel_(''), key, payload);
+  const code = r.code;
   if (code !== 200) {
-    console.error('Gemini error ' + code + ': ' + res.getContentText());
+    console.error('Gemini error ' + code + ' (' + r.model + '): ' + r.text.slice(0, 500));
     if (code === 429) throw new Error('いま混み合っています。少し時間をおいて話しかけてください');
     throw new Error('返事を作れませんでした（' + code + '）。少し待ってもう一度お試しください');
   }
 
-  const data = JSON.parse(res.getContentText());
+  const data = JSON.parse(r.text);
   const cand = data.candidates && data.candidates[0];
   const raw = cand && cand.content && cand.content.parts
     ? cand.content.parts.filter(function (p) { return p.text && !p.thought; }).map(function (p) { return p.text; }).join('')
     : '';
 
   if (!raw) {
-    return { reply: 'ごめんね、うまく言葉が出てこなかったみたい。もう一度話しかけてくれる？', emotion: 'sad' };
+    return { reply: 'ごめんね、うまく言葉が出てこなかったみたい。もう一度話しかけてくれる？', emotion: 'sad', model: r.model };
   }
-  return parseReply_(raw);
+  return Object.assign(parseReply_(raw), { model: r.model });
 }
+
+/**
+ * 使用する Gemini 会話モデルを決める。
+ * 画面で選んだモデル → スクリプトプロパティ GEMINI_MODEL → 汎用の最新モデル の順。不正な名前は無視する
+ */
+function resolveGeminiModel_(requested) {
+  const req = String(requested || '').trim().toLowerCase();
+  if (req && GEMINI_MODEL_PATTERN.test(req)) return req;
+  const prop = String(props_().getProperty('GEMINI_MODEL') || '').trim().toLowerCase();
+  if (prop && GEMINI_MODEL_PATTERN.test(prop)) return prop;
+  return FALLBACK_GEMINI_MODELS[0];
+}
+
+/** モデルが存在しない（廃止・名前違い・未公開）ことを示す応答か */
+function isModelNotFound_(code, text) {
+  if (code === 404) return true;
+  if (code === 400 || code === 403) {
+    return /not found|is not supported|NOT_FOUND|unknown model|invalid model|does not have access/i.test(String(text));
+  }
+  return false;
+}
+
+/**
+ * Gemini generateContent を呼ぶ。
+ * 指定モデル → 汎用の最新モデル（順番に）で、該当があるまで試す。混雑（429/500/503）は待って再試行
+ * 戻り値 { code, text, model（実際に使ったモデル） }
+ */
+function fetchGemini_(model, key, payload) {
+  const first = model || resolveGeminiModel_('');
+  const candidates = [first].concat(FALLBACK_GEMINI_MODELS.filter(function (m) { return m !== first; }));
+  let res = { code: 0, text: '', model: first };
+  for (let i = 0; i < candidates.length; i++) {
+    const m = candidates[i];
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(m) + ':generateContent';
+    const options = {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': key },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = UrlFetchApp.fetch(url, options);
+      res = { code: r.getResponseCode(), text: r.getContentText(), model: m };
+      if (res.code !== 429 && res.code !== 503 && res.code !== 500) break;
+      Utilities.sleep(1200 * (attempt + 1));
+    }
+    if (!isModelNotFound_(res.code, res.text)) break;
+    console.warn('Geminiモデル「' + m + '」に該当がないため次の候補に切り替えます');
+  }
+  return res;
+}
+
+
 
 function parseReply_(raw) {
   let text = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
@@ -1009,9 +1065,8 @@ function checkVoiceSlot_(user) {
 }
 
 /** 声のサンプルを Gemini に聞かせて、声の特徴を文章にする */
-function describeVoice_(b64) {
+function describeVoice_(b64, model) {
   const key = props_().getProperty('GEMINI_API_KEY');
-  const model = props_().getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
   const prompt = [
     'Listen to the voice in this audio clip.',
     'Describe ONLY its general vocal characteristics so that a text-to-speech voice designer can create a similar-sounding voice:',
@@ -1038,15 +1093,12 @@ function describeVoice_(b64) {
       }
     }
   };
-  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
-    method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
-    payload: JSON.stringify(payload), muteHttpExceptions: true
-  });
-  if (res.getResponseCode() !== 200) {
-    console.error('describeVoice ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 500));
-    throw new Error('声の特徴を読み取れませんでした（' + res.getResponseCode() + '）');
+  const res = fetchGemini_(resolveGeminiModel_(model), key, payload);
+  if (res.code !== 200) {
+    console.error('describeVoice ' + res.code + ' (' + res.model + '): ' + res.text.slice(0, 500));
+    throw new Error('声の特徴を読み取れませんでした（' + res.code + '）');
   }
-  const data = JSON.parse(res.getContentText());
+  const data = JSON.parse(res.text);
   const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
   const raw = parts.filter(function (p) { return p.text && !p.thought; }).map(function (p) { return p.text; }).join('');
   const o = JSON.parse(String(raw).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, ''));
@@ -1060,7 +1112,7 @@ function createSimilarVoice_(req) {
   checkVoiceSlot_(user);
   const b64 = checkWav_(req.sample, 3, 30, '声のサンプル');
   const label = String(req.label || '').trim().slice(0, 20) || '似た声';
-  const d = describeVoice_(b64);
+  const d = describeVoice_(b64, req.model);
 
   const data = voicesApi_('post', '', {
     store: true,

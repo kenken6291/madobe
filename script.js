@@ -54,6 +54,7 @@ const DEFAULT_PREFS = {
   showCaption: true,   // 全画面時の字幕
   hideInput: false,    // 全画面時に入力欄を隠す
   browserFs: true,     // ブラウザも全画面に
+  geminiModel: null,   // 会話の Gemini モデル（null＝config.js の既定、''＝自動モード）
   voices: {}           // 用意したキャラクターごとの声 { preset: {gVoice, gSpeed, voiceURI, rate, pitch} }
                        // ※写真のキャラクターの声はサーバー（photoChars）に保存し、'custom:キャラID' で扱う
 };
@@ -67,6 +68,30 @@ function loadPrefs() {
 }
 const prefs = loadPrefs();
 function savePrefs() { store.set(PREFS_KEY, JSON.stringify(prefs)); }
+
+// ---- Gemini 会話モデル（config.js の GEMINI_MODEL_OPTIONS） ----
+const GEMINI_MODEL_OPTIONS = Array.isArray(window.GEMINI_MODEL_OPTIONS) && window.GEMINI_MODEL_OPTIONS.length
+  ? window.GEMINI_MODEL_OPTIONS
+  : [{ value: '', label: '自動モード（汎用の最新）' }];
+function curModel() {
+  const m = prefs.geminiModel;
+  if (typeof m === 'string' && GEMINI_MODEL_OPTIONS.some(o => o.value === m)) return m;
+  return String(window.GEMINI_MODEL_DEFAULT || '');
+}
+function modelLabel(value) {
+  const o = GEMINI_MODEL_OPTIONS.find(x => x.value === value);
+  return o ? o.label : (value || '自動モード（汎用の最新）');
+}
+let lastUsedModel = '';
+let modelFallbackNoted = '';
+function noteModelResult(r) {
+  if (!r || !r.model) return;
+  lastUsedModel = r.model;
+  if (r.fallback && curModel() && modelFallbackNoted !== curModel()) {
+    modelFallbackNoted = curModel();
+    toast(`${modelLabel(curModel())} が使えないため、${r.model} でお話しします`);
+  }
+}
 
 const state = {
   token: store.get(TOKEN_KEY) || '',
@@ -1199,9 +1224,10 @@ async function sendMessage(textArg) {
 
   try {
     ensureAudioCtx();
-    const payload = { message: text };
+    const payload = { message: text, model: curModel() };
     if (useGeminiVoice()) payload.tts = geminiTtsOpts(curVoices(), curPreset(), curCategory());
     const r = await api('chat', payload);
+    noteModelResult(r);
     typing.remove();
     await presentReply(r.reply, r.emotion, r.audio);
   } catch (err) {
@@ -1400,6 +1426,7 @@ function openSettings(tab = 'char') {
     config: Object.assign(defaultConfig(), u.avatarConfig || {}),
     voices: JSON.parse(JSON.stringify(curVoices())),
     engine: prefs.ttsEngine || 'gemini',
+    model: curModel(),
     view: VIEW_KEYS.reduce((o, k) => (o[k] = prefs[k], o), {})
   });
   if (isCustom && curChar()) draft.category = curChar().category;
@@ -1908,7 +1935,7 @@ function bindMaker() {
       setMsg(msg, isRep ? '本人の声を再現しています…（30秒ほどかかることがあります）' : '声の特徴を聞き取って、似た声を作っています…');
       const r = isRep
         ? await api('createReplicaVoice', { sample: maker.sample.data, consent: maker.consent.data, agree: true, label })
-        : await api('createSimilarVoice', { sample: maker.sample.data, label });
+        : await api('createSimilarVoice', { sample: maker.sample.data, label, model: curModel() });
       state.user = r.user;
       setDraftVoice({ gVoice: r.voice.id });
       draft.engine = 'gemini';
@@ -1951,8 +1978,22 @@ function bindMaker() {
 
 // ---- 表示と会話パネル ----
 
+function renderModelPicker() {
+  const sel = $('#modelSelect');
+  sel.innerHTML = '';
+  GEMINI_MODEL_OPTIONS.forEach(o => {
+    const op = document.createElement('option');
+    op.value = o.value;
+    op.textContent = o.label;
+    sel.appendChild(op);
+  });
+  sel.value = draft.model;
+  $('#modelUsed').textContent = lastUsedModel ? `（さっきの返事：${lastUsedModel}）` : '';
+}
+
 function renderViewPanel() {
   VIEW_KEYS.forEach(k => { $(VIEW_IDS[k]).checked = !!draft.view[k]; });
+  renderModelPicker();
   const srOff = !SR;
   ['#optHandsFree', '#optAutoSend'].forEach(id => {
     $(id).disabled = srOff;
@@ -2098,6 +2139,7 @@ function bindSettings() {
 
   // 表示と会話
   VIEW_KEYS.forEach(k => $(VIEW_IDS[k]).addEventListener('change', e => { draft.view[k] = e.target.checked; }));
+  $('#modelSelect').addEventListener('change', e => { draft.model = e.target.value; });
 
   $('#settingsCancel').addEventListener('click', closeSettings);
   $('#settingsModal').addEventListener('click', e => { if (e.target.id === 'settingsModal') closeSettings(); });
@@ -2164,6 +2206,8 @@ function bindSettings() {
       if (prefs.voices.custom) local.custom = prefs.voices.custom;
       prefs.voices = local;
       prefs.ttsEngine = draft.engine;
+      if (prefs.geminiModel !== draft.model) modelFallbackNoted = '';
+      prefs.geminiModel = draft.model;
       VIEW_KEYS.forEach(k => { prefs[k] = draft.view[k]; });
       savePrefs();
       if (!prefs.tts) stopSpeaking();

@@ -392,6 +392,15 @@
             </fieldset>
 
             <fieldset class="opt-group">
+              <legend>AIモデル</legend>
+              <label class="field">
+                <span>会話に使う Gemini のモデル</span>
+                <select id="modelSelect"></select>
+              </label>
+              <p class="hint">選んだモデルが使えない時は、汎用の最新モデルに自動で切り替わります。<span id="modelUsed"></span></p>
+            </fieldset>
+
+            <fieldset class="opt-group">
               <legend>全画面表示</legend>
               <label class="opt">
                 <input type="checkbox" class="switch" id="optStage">
